@@ -13,10 +13,10 @@ use mm2_test_helpers::electrums::*;
 #[cfg(all(not(target_arch = "wasm32"), not(feature = "zhtlc-native-tests")))]
 use mm2_test_helpers::for_tests::check_stats_swap_status;
 use mm2_test_helpers::for_tests::{btc_segwit_conf, btc_with_spv_conf, btc_with_sync_starting_header,
-                                  check_recent_swaps, enable_eth_coin, enable_qrc20, eth_jst_testnet_conf,
-                                  eth_testnet_conf, find_metrics_in_json, from_env_file, get_shared_db_id, mm_spat,
-                                  morty_conf, rick_conf, sign_message, start_swaps, tbtc_with_spv_conf,
-                                  test_qrc20_history_impl, tqrc20_conf, verify_message,
+                                  check_recent_swaps, enable_eth_coin, enable_qrc20, enable_qrc20_hd,
+                                  eth_jst_testnet_conf, eth_testnet_conf, find_metrics_in_json, from_env_file,
+                                  get_shared_db_id, mm_spat, morty_conf, rick_conf, sign_message, start_swaps,
+                                  tbtc_with_spv_conf, test_qrc20_history_impl, tqrc20_conf, verify_message,
                                   wait_for_swap_contract_negotiation, wait_for_swap_negotiation_failure,
                                   wait_for_swaps_finish_and_check_status, wait_till_history_has_records,
                                   MarketMakerIt, Mm2InitPrivKeyPolicy, Mm2TestConf, Mm2TestConfForSwap, RaiiDump,
@@ -725,9 +725,14 @@ fn test_rpc_password_from_json_no_userpass() {
 /// Trades few pairs concurrently to speed up the process and also act like "load" test
 ///
 /// Please note that it
+// Todo: check if this is still needed after refactors
+#[allow(clippy::too_many_arguments)]
 async fn trade_base_rel_electrum(
     bob_priv_key_policy: Mm2InitPrivKeyPolicy,
     alice_priv_key_policy: Mm2InitPrivKeyPolicy,
+    // Todo: this should be fixed to include also bob account and address index, should be check balance after swaps too?
+    alice_account: Option<u32>,
+    alice_address_index: Option<u32>,
     pairs: &[(&'static str, &'static str)],
     maker_price: f64,
     taker_price: f64,
@@ -741,7 +746,7 @@ async fn trade_base_rel_electrum(
         {"coin":"ZOMBIE","asset":"ZOMBIE","fname":"ZOMBIE (TESTCOIN)","txversion":4,"overwintered":1,"mm2":1,"protocol":{"type":"ZHTLC"},"required_confirmations":0},
     ]);
 
-    let bob_conf = Mm2TestConfForSwap::bob_conf_with_policy(bob_priv_key_policy, &coins);
+    let bob_conf = Mm2TestConfForSwap::bob_conf_with_policy(&bob_priv_key_policy, &coins);
     let mut mm_bob = MarketMakerIt::start_async(bob_conf.conf, bob_conf.rpc_password, None)
         .await
         .unwrap();
@@ -754,7 +759,7 @@ async fn trade_base_rel_electrum(
 
     Timer::sleep(1.).await;
 
-    let alice_conf = Mm2TestConfForSwap::alice_conf_with_policy(alice_priv_key_policy, &coins, &mm_bob.my_seed_addr());
+    let alice_conf = Mm2TestConfForSwap::alice_conf_with_policy(&alice_priv_key_policy, &coins, &mm_bob.my_seed_addr());
     let mut mm_alice = MarketMakerIt::start_async(alice_conf.conf, alice_conf.rpc_password, None)
         .await
         .unwrap();
@@ -791,11 +796,20 @@ async fn trade_base_rel_electrum(
         log!("enable ZOMBIE alice {:?}", zombie_alice);
     }
     // Enable coins on Bob side. Print the replies in case we need the address.
-    let rc = enable_coins_eth_electrum(&mm_bob, ETH_DEV_NODES).await;
+    let rc = match bob_priv_key_policy {
+        Mm2InitPrivKeyPolicy::Iguana => enable_coins_eth_electrum(&mm_bob, ETH_DEV_NODES).await,
+        // Todo: this should be fixed too
+        Mm2InitPrivKeyPolicy::GlobalHDAccount => enable_coins_hd_eth_electrum(&mm_bob, ETH_DEV_NODES, None, None).await,
+    };
     log!("enable_coins (bob): {:?}", rc);
 
     // Enable coins on Alice side. Print the replies in case we need the address.
-    let rc = enable_coins_eth_electrum(&mm_alice, ETH_DEV_NODES).await;
+    let rc = match alice_priv_key_policy {
+        Mm2InitPrivKeyPolicy::Iguana => enable_coins_eth_electrum(&mm_alice, ETH_DEV_NODES).await,
+        Mm2InitPrivKeyPolicy::GlobalHDAccount => {
+            enable_coins_hd_eth_electrum(&mm_alice, ETH_DEV_NODES, alice_account, alice_address_index).await
+        },
+    };
     log!("enable_coins (alice): {:?}", rc);
 
     let uuids = start_swaps(&mut mm_bob, &mut mm_alice, pairs, maker_price, taker_price, volume).await;
@@ -873,11 +887,13 @@ async fn trade_base_rel_electrum(
 #[cfg(not(target_arch = "wasm32"))]
 fn trade_test_electrum_and_eth_coins() {
     let bob_policy = Mm2InitPrivKeyPolicy::Iguana;
-    let alice_policy = Mm2InitPrivKeyPolicy::GlobalHDAccount(0);
+    let alice_policy = Mm2InitPrivKeyPolicy::GlobalHDAccount;
     let pairs = &[("ETH", "JST")];
     block_on(trade_base_rel_electrum(
         bob_policy,
         alice_policy,
+        Some(0),
+        Some(0),
         pairs,
         1.,
         2.,
@@ -891,7 +907,16 @@ fn trade_test_electrum_rick_zombie() {
     let bob_policy = Mm2InitPrivKeyPolicy::Iguana;
     let alice_policy = Mm2InitPrivKeyPolicy::Iguana;
     let pairs = &[("RICK", "ZOMBIE")];
-    block_on(trade_base_rel_electrum(bob_policy, alice_policy, pairs, 1., 2., 0.1));
+    block_on(trade_base_rel_electrum(
+        bob_policy,
+        alice_policy,
+        None,
+        None,
+        pairs,
+        1.,
+        2.,
+        0.1,
+    ));
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -7242,6 +7267,7 @@ fn test_tbtc_block_header_sync() {
     block_on(mm_bob.stop()).unwrap();
 }
 
+// Todo: check test time with normal enable and previous implementation
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_enable_coins_with_hd_account_id() {
@@ -7256,48 +7282,82 @@ fn test_enable_coins_with_hd_account_id() {
         btc_segwit_conf(),
     ]);
 
-    let hd_account_id = 0;
-    let conf_0 = Mm2TestConf::seednode_with_hd_account(PASSPHRASE, hd_account_id, &coins);
+    let account = Some(0);
+    let address_index = Some(0);
+    let conf_0 = Mm2TestConf::seednode_with_hd_account(PASSPHRASE, &coins);
     let mm_hd_0 = MarketMakerIt::start(conf_0.conf, conf_0.rpc_password, None).unwrap();
     let (_dump_log, _dump_dashboard) = mm_hd_0.mm_dump();
     log!("log path: {}", mm_hd_0.log_path.display());
 
-    let eth = block_on(enable_native(&mm_hd_0, "ETH", ETH_DEV_NODES));
+    // Todo: check hd test for nch and separate activation functions too
+    let eth = block_on(enable_native_hd(&mm_hd_0, "ETH", ETH_DEV_NODES, account, address_index));
     assert_eq!(eth.address, "0x1737F1FaB40c6Fd3dc729B51C0F97DB3297CCA93");
-    let jst = block_on(enable_native(&mm_hd_0, "JST", ETH_DEV_NODES));
+    let jst = block_on(enable_native_hd(&mm_hd_0, "JST", ETH_DEV_NODES, account, address_index));
     assert_eq!(jst.address, "0x1737F1FaB40c6Fd3dc729B51C0F97DB3297CCA93");
-    let rick = block_on(enable_electrum(&mm_hd_0, "RICK", TX_HISTORY, RICK_ELECTRUM_ADDRS));
+    let rick = block_on(enable_electrum_hd(
+        &mm_hd_0,
+        "RICK",
+        TX_HISTORY,
+        RICK_ELECTRUM_ADDRS,
+        account,
+        address_index,
+    ));
     assert_eq!(rick.address, "RXNtAyDSsY3DS3VxTpJegzoHU9bUX54j56");
-    let qrc20 = block_on(enable_qrc20(
+    let qrc20 = block_on(enable_qrc20_hd(
         &mm_hd_0,
         "QRC20",
         QRC20_ELECTRUMS,
         "0xd362e096e873eb7907e205fadc6175c6fec7bc44",
+        account,
+        address_index,
     ));
     assert_eq!(qrc20["address"].as_str(), Some("qRtCTiPHW9e6zH9NcRhjMVfq7sG37SvgrL"));
-    let btc_segwit = block_on(enable_electrum(&mm_hd_0, "BTC-segwit", TX_HISTORY, RICK_ELECTRUM_ADDRS));
+    let btc_segwit = block_on(enable_electrum_hd(
+        &mm_hd_0,
+        "BTC-segwit",
+        TX_HISTORY,
+        RICK_ELECTRUM_ADDRS,
+        account,
+        address_index,
+    ));
     assert_eq!(btc_segwit.address, "bc1q6vyur5hjul2m0979aadd6u7ptuj9ac4gt0ha0c");
 
-    let hd_account_id = 1;
-    let conf_1 = Mm2TestConf::seednode_with_hd_account(PASSPHRASE, hd_account_id, &coins);
+    let address_index = Some(1);
+    let conf_1 = Mm2TestConf::seednode_with_hd_account(PASSPHRASE, &coins);
     let mm_hd_1 = MarketMakerIt::start(conf_1.conf, conf_1.rpc_password, None).unwrap();
     let (_dump_log, _dump_dashboard) = mm_hd_1.mm_dump();
     log!("log path: {}", mm_hd_1.log_path.display());
 
-    let eth = block_on(enable_native(&mm_hd_1, "ETH", ETH_DEV_NODES));
+    let eth = block_on(enable_native_hd(&mm_hd_1, "ETH", ETH_DEV_NODES, account, address_index));
     assert_eq!(eth.address, "0xDe841899aB4A22E23dB21634e54920aDec402397");
-    let jst = block_on(enable_native(&mm_hd_1, "JST", ETH_DEV_NODES));
+    let jst = block_on(enable_native_hd(&mm_hd_1, "JST", ETH_DEV_NODES, account, address_index));
     assert_eq!(jst.address, "0xDe841899aB4A22E23dB21634e54920aDec402397");
-    let rick = block_on(enable_electrum(&mm_hd_1, "RICK", TX_HISTORY, RICK_ELECTRUM_ADDRS));
+    let rick = block_on(enable_electrum_hd(
+        &mm_hd_1,
+        "RICK",
+        TX_HISTORY,
+        RICK_ELECTRUM_ADDRS,
+        account,
+        address_index,
+    ));
     assert_eq!(rick.address, "RVyndZp3ZrhGKSwHryyM3Kcz9aq2EJrW1z");
-    let qrc20 = block_on(enable_qrc20(
+    let qrc20 = block_on(enable_qrc20_hd(
         &mm_hd_1,
         "QRC20",
         QRC20_ELECTRUMS,
         "0xd362e096e873eb7907e205fadc6175c6fec7bc44",
+        account,
+        address_index,
     ));
     assert_eq!(qrc20["address"].as_str(), Some("qY8FNq2ZDUh52BjNvaroFoeHdr3AAhqsxW"));
-    let btc_segwit = block_on(enable_electrum(&mm_hd_1, "BTC-segwit", TX_HISTORY, RICK_ELECTRUM_ADDRS));
+    let btc_segwit = block_on(enable_electrum_hd(
+        &mm_hd_1,
+        "BTC-segwit",
+        TX_HISTORY,
+        RICK_ELECTRUM_ADDRS,
+        account,
+        address_index,
+    ));
     assert_eq!(btc_segwit.address, "bc1q6kxcwcrsm5z8pe940xxu294q7588mqvarttxcx");
 }
 
@@ -7311,8 +7371,11 @@ fn test_get_shared_db_id() {
     let coins = json!([rick_conf()]);
     let confs = vec![
         Mm2TestConf::seednode(PASSPHRASE, &coins),
-        Mm2TestConf::seednode_with_hd_account(PASSPHRASE, 0, &coins),
-        Mm2TestConf::seednode_with_hd_account(PASSPHRASE, 1, &coins),
+        Mm2TestConf::seednode_with_hd_account(PASSPHRASE, &coins),
+        Mm2TestConf::seednode_with_hd_account(PASSPHRASE, &coins),
+        // Todo: remove these
+        // Mm2TestConf::seednode_with_hd_account(PASSPHRASE, 0, &coins),
+        // Mm2TestConf::seednode_with_hd_account(PASSPHRASE, 1, &coins),
     ];
 
     let mut shared_db_id = None;

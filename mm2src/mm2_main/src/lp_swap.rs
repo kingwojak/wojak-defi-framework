@@ -1802,6 +1802,8 @@ mod lp_swap_tests {
             enable_params: Default::default(),
             priv_key_policy: PrivKeyActivationPolicy::ContextPrivKey,
             check_utxo_maturity: None,
+            account: None,
+            address_index: None,
         }
     }
 

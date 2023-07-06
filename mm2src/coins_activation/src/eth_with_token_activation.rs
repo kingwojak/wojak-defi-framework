@@ -46,6 +46,12 @@ impl From<EthActivationV2Error> for EnablePlatformCoinWithTokensError {
             EthActivationV2Error::DerivationPathIsNotSet => EnablePlatformCoinWithTokensError::InvalidPayload(
                 "'derivation_path' field is not found in config".to_string(),
             ),
+            EthActivationV2Error::AccountNotSet => {
+                EnablePlatformCoinWithTokensError::InvalidPayload("'account' field is None".to_string())
+            },
+            EthActivationV2Error::AddressIndexNotSet => {
+                EnablePlatformCoinWithTokensError::InvalidPayload("'address_index' field is None".to_string())
+            },
             EthActivationV2Error::ErrorDeserializingDerivationPath(e) => {
                 EnablePlatformCoinWithTokensError::InvalidPayload(e)
             },

@@ -289,5 +289,7 @@ fn default_zcoin_activation_params() -> ZcoinActivationParams {
         zcash_params_path: None,
         scan_blocks_per_iteration: 0,
         scan_interval_ms: 0,
+        account: None,
+        address_index: None,
     }
 }

@@ -26,6 +26,10 @@ pub enum EthActivationV2Error {
     AtLeastOneNodeRequired,
     #[display(fmt = "'derivation_path' field is not found in config")]
     DerivationPathIsNotSet,
+    #[display(fmt = "'account' field is None")]
+    AccountNotSet,
+    #[display(fmt = "'address_index' field is None")]
+    AddressIndexNotSet,
     #[display(fmt = "Error deserializing 'derivation_path': {}", _0)]
     ErrorDeserializingDerivationPath(String),
     PrivKeyPolicyNotAllowed(PrivKeyPolicyNotAllowed),
@@ -100,6 +104,9 @@ pub struct EthActivationV2Request {
     pub required_confirmations: Option<u64>,
     #[serde(default)]
     pub priv_key_policy: EthPrivKeyActivationPolicy,
+    // Todo: revise these 2 fields
+    pub account: Option<u32>,
+    pub address_index: Option<u32>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -246,7 +253,8 @@ pub async fn eth_coin_from_conf_and_request_v2(
         }
     }
 
-    let (my_address, priv_key_policy) = build_address_and_priv_key_policy(conf, priv_key_policy).await?;
+    let (my_address, priv_key_policy) =
+        build_address_and_priv_key_policy(conf, priv_key_policy, req.account, req.address_index).await?;
     let my_address_str = checksum_address(&format!("{:02x}", my_address));
 
     let chain_id = conf["chain_id"].as_u64();
@@ -319,9 +327,12 @@ pub async fn eth_coin_from_conf_and_request_v2(
 /// Processes the given `priv_key_policy` and generates corresponding `KeyPair`.
 /// This function expects either [`PrivKeyBuildPolicy::IguanaPrivKey`]
 /// or [`PrivKeyBuildPolicy::GlobalHDAccount`], otherwise returns `PrivKeyPolicyNotAllowed` error.
+// Todo: maybe change the parameters passed to this function and the function name
 pub(crate) async fn build_address_and_priv_key_policy(
     conf: &Json,
     priv_key_policy: EthPrivKeyBuildPolicy,
+    account: Option<u32>,
+    address_index: Option<u32>,
 ) -> MmResult<(Address, EthPrivKeyPolicy), EthActivationV2Error> {
     let raw_priv_key = match priv_key_policy {
         EthPrivKeyBuildPolicy::IguanaPrivKey(iguana) => iguana,
@@ -330,8 +341,10 @@ pub(crate) async fn build_address_and_priv_key_policy(
             let derivation_path: Option<StandardHDPathToCoin> = json::from_value(conf["derivation_path"].clone())
                 .map_to_mm(|e| EthActivationV2Error::ErrorDeserializingDerivationPath(e.to_string()))?;
             let derivation_path = derivation_path.or_mm_err(|| EthActivationV2Error::DerivationPathIsNotSet)?;
+            let account = account.or_mm_err(|| EthActivationV2Error::AccountNotSet)?;
+            let address_index = address_index.or_mm_err(|| EthActivationV2Error::AddressIndexNotSet)?;
             global_hd_ctx
-                .derive_secp256k1_secret(&derivation_path)
+                .derive_secp256k1_secret(&derivation_path, account, address_index)
                 .mm_err(|e| EthActivationV2Error::InternalError(e.to_string()))?
         },
         #[cfg(target_arch = "wasm32")]

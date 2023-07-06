@@ -182,7 +182,8 @@ pub async fn refresh_nft_metadata(ctx: MmArc, req: RefreshMetadataReq) -> MmResu
 
 async fn get_moralis_nft_list(ctx: &MmArc, chain: &Chain, url: &Url) -> MmResult<Vec<Nft>, GetNftInfoError> {
     let mut res_list = Vec::new();
-    let my_address = get_eth_address(ctx, &chain.to_ticker()).await?;
+    // Todo: implement HD account for NFTs
+    let my_address = get_eth_address(ctx, &chain.to_ticker(), None, None).await?;
 
     let mut uri_without_cursor = url.clone();
     uri_without_cursor.set_path(MORALIS_API_ENDPOINT);
@@ -254,7 +255,8 @@ async fn get_moralis_nft_transfers(
     url: &Url,
 ) -> MmResult<Vec<NftTransferHistory>, GetNftInfoError> {
     let mut res_list = Vec::new();
-    let my_address = get_eth_address(ctx, &chain.to_ticker()).await?;
+    // Todo: implement HD account for NFTs
+    let my_address = get_eth_address(ctx, &chain.to_ticker(), None, None).await?;
 
     let mut uri_without_cursor = url.clone();
     uri_without_cursor.set_path(MORALIS_API_ENDPOINT);
@@ -479,6 +481,9 @@ async fn update_nft_list<T: NftListStorageOps + NftTxHistoryStorageOps>(
     let txs = storage.get_txs_from_block(chain, scan_from_block).await?;
     let req = MyAddressReq {
         coin: chain.to_ticker(),
+        // Todo: implement HD account for NFTs
+        account: None,
+        address_index: None,
     };
     let my_address = get_my_address(ctx.clone(), req).await?.wallet_address.to_lowercase();
     for tx in txs.into_iter() {

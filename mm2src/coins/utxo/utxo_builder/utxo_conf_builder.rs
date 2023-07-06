@@ -22,6 +22,10 @@ pub enum UtxoConfError {
     CurrencyNameIsNotSet,
     #[display(fmt = "'derivation_path' field is not found in config")]
     DerivationPathIsNotSet,
+    #[display(fmt = "'account' field is not found in config")]
+    AccountIsNotSet,
+    #[display(fmt = "'address_index' field is not found in config")]
+    AddressIndexIsNotSet,
     #[display(fmt = "'trezor_coin' field is not found in config")]
     TrezorCoinIsNotSet,
     #[display(fmt = "Error deserializing 'derivation_path': {}", _0)]
@@ -90,6 +94,8 @@ impl<'a> UtxoConfBuilder<'a> {
         let estimate_fee_blocks = self.estimate_fee_blocks();
         let trezor_coin = self.trezor_coin();
         let derivation_path = self.derivation_path()?;
+        let account = self.account();
+        let address_index = self.address_index();
         let avg_blocktime = self.avg_blocktime();
         let spv_conf = self.spv_conf()?;
 
@@ -126,6 +132,8 @@ impl<'a> UtxoConfBuilder<'a> {
             trezor_coin,
             spv_conf,
             derivation_path,
+            account,
+            address_index,
             avg_blocktime,
         })
     }
@@ -293,6 +301,10 @@ impl<'a> UtxoConfBuilder<'a> {
         json::from_value(self.conf["derivation_path"].clone())
             .map_to_mm(|e| UtxoConfError::ErrorDeserializingDerivationPath(e.to_string()))
     }
+
+    fn account(&self) -> Option<u32> { self.params.account }
+
+    fn address_index(&self) -> Option<u32> { self.params.address_index }
 
     fn avg_blocktime(&self) -> Option<u64> { self.conf["avg_blocktime"].as_u64() }
 }

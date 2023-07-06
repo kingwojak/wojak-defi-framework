@@ -74,15 +74,18 @@ fn activate_z_coin_light() {
 fn activate_z_coin_with_hd_account() {
     let coins = json!([zombie_conf()]);
 
-    let hd_account_id = 0;
-    let conf = Mm2TestConf::seednode_with_hd_account(ZOMBIE_TEST_BIP39_ACTIVATION_SEED, hd_account_id, &coins);
+    let account = Some(0);
+    let address_index = Some(0);
+    let conf = Mm2TestConf::seednode_with_hd_account(ZOMBIE_TEST_BIP39_ACTIVATION_SEED, &coins);
     let mm = MarketMakerIt::start(conf.conf, conf.rpc_password, None).unwrap();
 
-    let activation_result = block_on(enable_z_coin_light(
+    let activation_result = block_on(enable_z_coin_hd_light(
         &mm,
         ZOMBIE_TICKER,
         ZOMBIE_ELECTRUMS,
         ZOMBIE_LIGHTWALLETD_URLS,
+        account,
+        address_index,
     ));
 
     let actual = match activation_result.wallet_balance {

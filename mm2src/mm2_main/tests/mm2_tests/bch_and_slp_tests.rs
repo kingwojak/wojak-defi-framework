@@ -2,9 +2,9 @@ use common::custom_futures::repeatable::{Ready, Retry};
 use common::{block_on, log, repeatable};
 use http::StatusCode;
 use itertools::Itertools;
-use mm2_test_helpers::for_tests::{disable_coin, enable_bch_with_tokens, enable_slp, my_tx_history_v2, sign_message,
-                                  tbch_for_slp_conf, tbch_usdf_conf, verify_message, MarketMakerIt, Mm2TestConf,
-                                  UtxoRpcMode};
+use mm2_test_helpers::for_tests::{disable_coin, enable_bch_with_tokens, enable_bch_with_tokens_hd, enable_slp,
+                                  my_tx_history_v2, sign_message, tbch_for_slp_conf, tbch_usdf_conf, verify_message,
+                                  MarketMakerIt, Mm2TestConf, UtxoRpcMode};
 use mm2_test_helpers::structs::{EnableBchWithTokensResponse, RpcV2Response, SignatureResponse, StandardHistoryV2Res,
                                 UtxoFeeDetails, VerificationResponse};
 use serde_json::{self as json, json, Value as Json};
@@ -624,6 +624,7 @@ fn test_sign_verify_message_slp() {
 }
 
 /// Tested via [Electron-Cash-SLP](https://github.com/simpleledger/Electron-Cash-SLP).
+// Todo: add more test cases for different accounts and address_indexes
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_bch_and_slp_with_hd_account_id() {
@@ -631,19 +632,21 @@ fn test_bch_and_slp_with_hd_account_id() {
 
     let coins = json!([tbch_for_slp_conf(), tbch_usdf_conf()]);
 
-    // HD account 0
-
-    let hd_account_id = 0;
-    let conf_0 = Mm2TestConf::seednode_with_hd_account(BIP39_PASSPHRASE, hd_account_id, &coins);
+    // HD account 0 and change 0 and address_index 0
+    let account = Some(0);
+    let address_index = Some(0);
+    let conf_0 = Mm2TestConf::seednode_with_hd_account(BIP39_PASSPHRASE, &coins);
     let mm_hd_0 = MarketMakerIt::start(conf_0.conf, conf_0.rpc_password, None).unwrap();
 
     let rpc_mode = UtxoRpcMode::electrum(T_BCH_ELECTRUMS);
-    let activation_result = block_on(enable_bch_with_tokens(
+    let activation_result = block_on(enable_bch_with_tokens_hd(
         &mm_hd_0,
         "tBCH",
         &["USDF"],
         rpc_mode,
         TX_HISTORY,
+        account,
+        address_index,
     ));
 
     let activation_result: RpcV2Response<EnableBchWithTokensResponse> = json::from_value(activation_result).unwrap();
@@ -663,19 +666,20 @@ fn test_bch_and_slp_with_hd_account_id() {
         .unwrap();
     assert_eq!(slp_addr, "slptest:qpylzql7gzh6yctm7uslsz5qufl44gk2tsfnl7m9uj");
 
-    // HD account 1
-
-    let hd_account_id = 1;
-    let conf_1 = Mm2TestConf::seednode_with_hd_account(BIP39_PASSPHRASE, hd_account_id, &coins);
+    // HD account 0 and change 0 and address_index 1
+    let address_index = Some(1);
+    let conf_1 = Mm2TestConf::seednode_with_hd_account(BIP39_PASSPHRASE, &coins);
     let mm_hd_1 = MarketMakerIt::start(conf_1.conf, conf_1.rpc_password, None).unwrap();
 
     let rpc_mode = UtxoRpcMode::electrum(T_BCH_ELECTRUMS);
-    let activation_result = block_on(enable_bch_with_tokens(
+    let activation_result = block_on(enable_bch_with_tokens_hd(
         &mm_hd_1,
         "tBCH",
         &["USDF"],
         rpc_mode,
         TX_HISTORY,
+        account,
+        address_index,
     ));
 
     let activation_result: RpcV2Response<EnableBchWithTokensResponse> = json::from_value(activation_result).unwrap();

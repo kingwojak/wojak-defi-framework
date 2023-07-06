@@ -561,8 +561,12 @@ pub struct UtxoCoinConf {
     /// Derivation path of the coin.
     /// This derivation path consists of `purpose` and `coin_type` only
     /// where the full `BIP44` address has the following structure:
+    // Todo: change this comment
     /// `m/purpose'/coin_type'/account'/change/address_index`.
     pub derivation_path: Option<StandardHDPathToCoin>,
+    // Todo: refactor those too and add comments
+    pub account: Option<u32>,
+    pub address_index: Option<u32>,
     /// The average time in seconds needed to mine a new block for this coin.
     pub avg_blocktime: Option<u64>,
 }
@@ -1369,6 +1373,11 @@ pub struct UtxoActivationParams {
     /// The flag determines whether to use mature unspent outputs *only* to generate transactions.
     /// https://github.com/KomodoPlatform/atomicDEX-API/issues/1181
     pub check_utxo_maturity: Option<bool>,
+    // Todo: refactor the below 2 fields to a single struct maybe, also find a good place for them in the struct
+    /// This determines which HD account to use for the UTXO coin.
+    pub account: Option<u32>,
+    /// This determines which HD address index to use for the UTXO coin.
+    pub address_index: Option<u32>,
 }
 
 #[derive(Debug, Display)]
@@ -1384,6 +1393,8 @@ pub enum UtxoFromLegacyReqErr {
     InvalidScanPolicy(json::Error),
     InvalidMinAddressesNumber(json::Error),
     InvalidPrivKeyPolicy(json::Error),
+    InvalidAccount(json::Error),
+    InvalidAddressIndex(json::Error),
 }
 
 impl UtxoActivationParams {
@@ -1421,6 +1432,9 @@ impl UtxoActivationParams {
         let priv_key_policy = json::from_value::<Option<PrivKeyActivationPolicy>>(req["priv_key_policy"].clone())
             .map_to_mm(UtxoFromLegacyReqErr::InvalidPrivKeyPolicy)?
             .unwrap_or(PrivKeyActivationPolicy::ContextPrivKey);
+        let account = json::from_value(req["account"].clone()).map_to_mm(UtxoFromLegacyReqErr::InvalidAccount)?;
+        let address_index =
+            json::from_value(req["address_index"].clone()).map_to_mm(UtxoFromLegacyReqErr::InvalidAddressIndex)?;
 
         Ok(UtxoActivationParams {
             mode,
@@ -1433,6 +1447,8 @@ impl UtxoActivationParams {
             enable_params,
             priv_key_policy,
             check_utxo_maturity,
+            account,
+            address_index,
         })
     }
 }
@@ -1844,6 +1860,7 @@ pub fn output_script(address: &Address, script_type: ScriptType) -> Script {
     }
 }
 
+// Todo: the pubkey should be for the account and address_index if this is used for HD mode
 pub fn address_by_conf_and_pubkey_str(
     coin: &str,
     conf: &Json,
@@ -1862,6 +1879,9 @@ pub fn address_by_conf_and_pubkey_str(
         enable_params: EnabledCoinBalanceParams::default(),
         priv_key_policy: PrivKeyActivationPolicy::ContextPrivKey,
         check_utxo_maturity: None,
+        // Todo: recheck these 2 fields
+        account: None,
+        address_index: None,
     };
     let conf_builder = UtxoConfBuilder::new(conf, &params, coin);
     let utxo_conf = try_s!(conf_builder.build());

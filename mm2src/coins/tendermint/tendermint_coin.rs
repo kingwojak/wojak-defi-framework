@@ -148,6 +148,9 @@ pub struct TendermintConf {
     /// where the full `BIP44` address has the following structure:
     /// `m/purpose'/coin_type'/account'/change/address_index`.
     derivation_path: Option<StandardHDPathToCoin>,
+    // Todo: like these other fields
+    account: Option<u32>,
+    address_index: Option<u32>,
 }
 
 impl TendermintConf {
@@ -172,9 +175,21 @@ impl TendermintConf {
             kind: TendermintInitErrorKind::ErrorDeserializingDerivationPath(e.to_string()),
         })?;
 
+        let account = json::from_value(conf["account"].clone()).map_to_mm(|e| TendermintInitError {
+            ticker: ticker.to_string(),
+            kind: TendermintInitErrorKind::ErrorDeserializingAccount(e.to_string()),
+        })?;
+
+        let address_index = json::from_value(conf["address_index"].clone()).map_to_mm(|e| TendermintInitError {
+            ticker: ticker.to_string(),
+            kind: TendermintInitErrorKind::ErrorDeserializingAddressIndex(e.to_string()),
+        })?;
+
         Ok(TendermintConf {
             avg_blocktime,
             derivation_path,
+            account,
+            address_index,
         })
     }
 }
@@ -261,8 +276,16 @@ pub enum TendermintInitErrorKind {
     InvalidDenom(String),
     #[display(fmt = "'derivation_path' field is not found in config")]
     DerivationPathIsNotSet,
+    #[display(fmt = "'account' field is not found in config")]
+    AccountIsNotSet,
+    #[display(fmt = "'address_index' field is not found in config")]
+    AddressIndexIsNotSet,
     #[display(fmt = "Error deserializing 'derivation_path': {}", _0)]
     ErrorDeserializingDerivationPath(String),
+    #[display(fmt = "Error deserializing 'account': {}", _0)]
+    ErrorDeserializingAccount(String),
+    #[display(fmt = "Error deserializing 'address_index': {}", _0)]
+    ErrorDeserializingAddressIndex(String),
     PrivKeyPolicyNotAllowed(PrivKeyPolicyNotAllowed),
     RpcError(String),
     #[display(fmt = "avg_blocktime is missing in coin configuration")]
@@ -2640,8 +2663,16 @@ pub(crate) fn secret_from_priv_key_policy(
                 ticker: ticker.to_string(),
                 kind: TendermintInitErrorKind::DerivationPathIsNotSet,
             })?;
+            let account = conf.account.or_mm_err(|| TendermintInitError {
+                ticker: ticker.to_string(),
+                kind: TendermintInitErrorKind::AccountIsNotSet,
+            })?;
+            let address_index = conf.address_index.or_mm_err(|| TendermintInitError {
+                ticker: ticker.to_string(),
+                kind: TendermintInitErrorKind::AddressIndexIsNotSet,
+            })?;
             global_hd
-                .derive_secp256k1_secret(derivation_path)
+                .derive_secp256k1_secret(derivation_path, account, address_index)
                 .mm_err(|e| TendermintInitError {
                     ticker: ticker.to_string(),
                     kind: TendermintInitErrorKind::InvalidPrivKey(e.to_string()),
@@ -2747,6 +2778,8 @@ pub mod tendermint_coin_tests {
         let conf = TendermintConf {
             avg_blocktime: AVG_BLOCKTIME,
             derivation_path: None,
+            account: None,
+            address_index: None,
         };
 
         let key_pair = key_pair_from_seed(IRIS_TESTNET_HTLC_PAIR1_SEED).unwrap();
@@ -2857,6 +2890,8 @@ pub mod tendermint_coin_tests {
         let conf = TendermintConf {
             avg_blocktime: AVG_BLOCKTIME,
             derivation_path: None,
+            account: None,
+            address_index: None,
         };
 
         let key_pair = key_pair_from_seed(IRIS_TESTNET_HTLC_PAIR1_SEED).unwrap();
@@ -2915,6 +2950,8 @@ pub mod tendermint_coin_tests {
         let conf = TendermintConf {
             avg_blocktime: AVG_BLOCKTIME,
             derivation_path: None,
+            account: None,
+            address_index: None,
         };
 
         let key_pair = key_pair_from_seed(IRIS_TESTNET_HTLC_PAIR1_SEED).unwrap();
@@ -2987,6 +3024,8 @@ pub mod tendermint_coin_tests {
         let conf = TendermintConf {
             avg_blocktime: AVG_BLOCKTIME,
             derivation_path: None,
+            account: None,
+            address_index: None,
         };
 
         let key_pair = key_pair_from_seed(IRIS_TESTNET_HTLC_PAIR1_SEED).unwrap();
@@ -3181,6 +3220,8 @@ pub mod tendermint_coin_tests {
         let conf = TendermintConf {
             avg_blocktime: AVG_BLOCKTIME,
             derivation_path: None,
+            account: None,
+            address_index: None,
         };
 
         let key_pair = key_pair_from_seed(IRIS_TESTNET_HTLC_PAIR1_SEED).unwrap();
@@ -3265,6 +3306,8 @@ pub mod tendermint_coin_tests {
         let conf = TendermintConf {
             avg_blocktime: AVG_BLOCKTIME,
             derivation_path: None,
+            account: None,
+            address_index: None,
         };
 
         let key_pair = key_pair_from_seed(IRIS_TESTNET_HTLC_PAIR1_SEED).unwrap();
@@ -3339,6 +3382,8 @@ pub mod tendermint_coin_tests {
         let conf = TendermintConf {
             avg_blocktime: AVG_BLOCKTIME,
             derivation_path: None,
+            account: None,
+            address_index: None,
         };
 
         let key_pair = key_pair_from_seed(IRIS_TESTNET_HTLC_PAIR1_SEED).unwrap();
@@ -3408,6 +3453,8 @@ pub mod tendermint_coin_tests {
         let conf = TendermintConf {
             avg_blocktime: AVG_BLOCKTIME,
             derivation_path: None,
+            account: None,
+            address_index: None,
         };
 
         let ctx = mm2_core::mm_ctx::MmCtxBuilder::default().into_mm_arc();
@@ -3460,6 +3507,8 @@ pub mod tendermint_coin_tests {
         let conf = TendermintConf {
             avg_blocktime: AVG_BLOCKTIME,
             derivation_path: None,
+            account: None,
+            address_index: None,
         };
 
         let ctx = mm2_core::mm_ctx::MmCtxBuilder::default().into_mm_arc();

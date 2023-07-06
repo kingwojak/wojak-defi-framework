@@ -5153,7 +5153,10 @@ pub async fn eth_coin_from_conf_and_request(
     }
     let contract_supports_watchers = req["contract_supports_watchers"].as_bool().unwrap_or_default();
 
-    let (my_address, key_pair) = try_s!(build_address_and_priv_key_policy(conf, priv_key_policy).await);
+    let account: Option<u32> = try_s!(json::from_value(req["account"].clone()));
+    let address_index: Option<u32> = try_s!(json::from_value(req["address_index"].clone()));
+    let (my_address, key_pair) =
+        try_s!(build_address_and_priv_key_policy(conf, priv_key_policy, account, address_index).await);
 
     let mut web3_instances = vec![];
     let event_handlers = rpc_event_handlers_for_eth_transport(ctx, ticker.to_string());
@@ -5408,12 +5411,18 @@ impl From<CryptoCtxError> for GetEthAddressError {
 }
 
 /// `get_eth_address` returns wallet address for coin with `ETH` protocol type.
-pub async fn get_eth_address(ctx: &MmArc, ticker: &str) -> MmResult<MyWalletAddress, GetEthAddressError> {
+pub async fn get_eth_address(
+    ctx: &MmArc,
+    ticker: &str,
+    account: Option<u32>,
+    address_index: Option<u32>,
+) -> MmResult<MyWalletAddress, GetEthAddressError> {
     let priv_key_policy = PrivKeyBuildPolicy::detect_priv_key_policy(ctx)?;
     // Convert `PrivKeyBuildPolicy` to `EthPrivKeyBuildPolicy` if it's possible.
     let priv_key_policy = EthPrivKeyBuildPolicy::try_from(priv_key_policy)?;
 
-    let (my_address, ..) = build_address_and_priv_key_policy(&ctx.conf, priv_key_policy).await?;
+    let (my_address, ..) =
+        build_address_and_priv_key_policy(&ctx.conf, priv_key_policy, account, address_index).await?;
     let wallet_address = checksum_address(&format!("{:#02x}", my_address));
 
     Ok(MyWalletAddress {

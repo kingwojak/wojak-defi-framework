@@ -123,6 +123,8 @@ pub(super) fn utxo_coin_fields_for_test(
             trezor_coin: None,
             spv_conf: None,
             derivation_path: None,
+            account: None,
+            address_index: None,
             avg_blocktime: None,
         },
         decimals: TEST_COIN_DECIMALS,

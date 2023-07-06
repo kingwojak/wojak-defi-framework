@@ -408,6 +408,9 @@ pub struct RawTransactionRes {
 #[derive(Debug, Deserialize)]
 pub struct MyAddressReq {
     coin: String,
+    // Todo: recheck this
+    account: Option<u32>,
+    address_index: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3911,7 +3914,7 @@ pub async fn get_my_address(ctx: MmArc, req: MyAddressReq) -> MmResult<MyWalletA
     let protocol: CoinProtocol = json::from_value(coins_en["protocol"].clone())?;
 
     let my_address = match protocol {
-        CoinProtocol::ETH => get_eth_address(&ctx, ticker).await?,
+        CoinProtocol::ETH => get_eth_address(&ctx, ticker, req.account, req.address_index).await?,
         _ => {
             return MmError::err(GetMyAddressError::CoinIsNotSupported(format!(
                 "{} doesn't support get_my_address",

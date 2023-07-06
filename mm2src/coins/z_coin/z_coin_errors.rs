@@ -217,6 +217,8 @@ pub enum ZCoinBuildError {
     RpcClientInitErr(ZcoinClientInitError),
     ZCashParamsNotFound,
     ZDerivationPathNotSet,
+    AccountNotSet,
+    AddressIndexNotSet,
     SaplingParamsInvalidChecksum,
 }
 
