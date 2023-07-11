@@ -763,7 +763,7 @@ pub enum ZcoinRpcMode {
     Light {
         electrum_servers: Vec<ElectrumRpcRequest>,
         light_wallet_d_servers: Vec<String>,
-        blocks_start_date: Option<u32>,
+        block_start_date: Option<u32>,
     },
 }
 
@@ -909,7 +909,7 @@ impl<'a> UtxoCoinBuilder for ZCoinBuilder<'a> {
                 .await?
             },
             ZcoinRpcMode::Light {
-                blocks_start_date,
+                block_start_date,
                 light_wallet_d_servers,
                 ..
             } => {
@@ -921,7 +921,7 @@ impl<'a> UtxoCoinBuilder for ZCoinBuilder<'a> {
                     self.protocol_info.consensus_params.clone(),
                     self.z_coin_params.scan_blocks_per_iteration,
                     self.z_coin_params.scan_interval_ms,
-                    blocks_start_date.to_owned(),
+                    block_start_date.to_owned(),
                 )
                 .await?
             },
