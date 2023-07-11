@@ -1,6 +1,7 @@
 use super::{z_coin_errors::*, ZcoinConsensusParams};
 use crate::utxo::rpc_clients::NativeClient;
 use crate::z_coin::storage::{BlockDbImpl, WalletDbShared};
+use crate::z_coin::z_rpc::z_coin_grpc::CompactBlock;
 use async_trait::async_trait;
 use common::executor::{spawn_abortable, AbortOnDropHandle};
 use futures::channel::mpsc::{Receiver as AsyncReceiver, Sender as AsyncSender};
@@ -66,6 +67,14 @@ pub type OnCompactBlockFn<'a> = dyn FnMut(String) -> Result<(), MmError<UpdateBl
 pub trait ZRpcOps {
     async fn get_block_height(&mut self) -> Result<u64, MmError<UpdateBlocksCacheErr>>;
 
+    async fn get_block(&mut self, block_height: u64) -> Result<CompactBlock, MmError<UpdateBlocksCacheErr>>;
+
+    async fn get_blocks(
+        &mut self,
+        from_height: u64,
+        to_height: u64,
+    ) -> Result<Vec<TonicCompactBlock>, MmError<UpdateBlocksCacheErr>>;
+
     async fn scan_blocks(
         &mut self,
         start_block: u64,
@@ -117,6 +126,54 @@ impl ZRpcOps for LightRpcClient {
             // return the message
             .into_inner();
         Ok(block.height)
+    }
+
+    async fn get_block(&mut self, block_height: u64) -> Result<CompactBlock, MmError<UpdateBlocksCacheErr>> {
+        let request = tonic::Request::new(BlockId {
+            height: block_height,
+            hash: vec![],
+        });
+
+        let response = self
+            .get_live_client()
+            .await?
+            .get_block(request)
+            .await
+            .map_to_mm(UpdateBlocksCacheErr::GrpcError)?
+            .into_inner();
+
+        Ok(response)
+    }
+
+    async fn get_blocks(
+        &mut self,
+        from_height: u64,
+        to_height: u64,
+    ) -> Result<Vec<TonicCompactBlock>, MmError<UpdateBlocksCacheErr>> {
+        let request = tonic::Request::new(BlockRange {
+            start: Some(BlockId {
+                height: from_height,
+                hash: Vec::new(),
+            }),
+            end: Some(BlockId {
+                height: to_height,
+                hash: Vec::new(),
+            }),
+        });
+        let mut response = self
+            .get_live_client()
+            .await?
+            .get_block_range(request)
+            .await
+            .map_to_mm(UpdateBlocksCacheErr::GrpcError)?
+            .into_inner();
+
+        let mut blocks = vec![];
+        while let Some(block) = Pin::new(&mut response).message().await? {
+            blocks.push(block)
+        }
+
+        Ok(blocks)
     }
 
     async fn scan_blocks(
@@ -183,6 +240,18 @@ impl ZRpcOps for LightRpcClient {
 impl ZRpcOps for NativeClient {
     async fn get_block_height(&mut self) -> Result<u64, MmError<UpdateBlocksCacheErr>> {
         Ok(self.get_block_count().compat().await?)
+    }
+
+    async fn get_block(&mut self, _block_height: u64) -> Result<TonicCompactBlock, MmError<UpdateBlocksCacheErr>> {
+        todo!()
+    }
+
+    async fn get_blocks(
+        &mut self,
+        _from_height: u64,
+        _to_height: u64,
+    ) -> Result<Vec<TonicCompactBlock>, MmError<UpdateBlocksCacheErr>> {
+        todo!()
     }
 
     async fn scan_blocks(
@@ -316,6 +385,7 @@ pub async fn create_wallet_db(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn init_light_client(
     coin: String,
     lightwalletd_urls: Vec<String>,
@@ -324,6 +394,7 @@ pub(super) async fn init_light_client(
     consensus_params: ZcoinConsensusParams,
     scan_blocks_per_iteration: u32,
     scan_interval_ms: u64,
+    start_date: Option<u32>,
 ) -> Result<(AsyncMutex<SaplingSyncConnector>, WalletDbShared), MmError<ZcoinClientInitError>> {
     let (sync_status_notifier, sync_watcher) = channel(1);
     let (on_tx_gen_notifier, on_tx_gen_watcher) = channel(1);
@@ -379,7 +450,12 @@ pub(super) async fn init_light_client(
     let light_rpc_clients = LightRpcClient {
         rpc_clients: AsyncMutex::new(rpc_clients),
     };
-    let abort_handle = spawn_abortable(light_wallet_db_sync_loop(sync_handle, Box::new(light_rpc_clients)));
+
+    let abort_handle = spawn_abortable(light_wallet_db_sync_loop(
+        sync_handle,
+        Box::new(light_rpc_clients),
+        start_date,
+    ));
 
     Ok((
         SaplingSyncConnector::new_mutex_wrapped(sync_watcher, on_tx_gen_notifier, abort_handle),
@@ -397,6 +473,7 @@ pub(super) async fn init_light_client(
     _consensus_params: ZcoinConsensusParams,
     _scan_blocks_per_iteration: u32,
     _scan_interval_ms: u64,
+    _start_date: Option<u32>,
 ) -> Result<(AsyncMutex<SaplingSyncConnector>, WalletDbShared), MmError<ZcoinClientInitError>> {
     todo!()
 }
@@ -426,7 +503,7 @@ pub(super) async fn init_native_client(
         scan_blocks_per_iteration,
         scan_interval_ms,
     };
-    let abort_handle = spawn_abortable(light_wallet_db_sync_loop(sync_handle, Box::new(native_client)));
+    let abort_handle = spawn_abortable(light_wallet_db_sync_loop(sync_handle, Box::new(native_client), None));
 
     Ok((
         SaplingSyncConnector::new_mutex_wrapped(sync_watcher, on_tx_gen_notifier, abort_handle),
@@ -467,7 +544,7 @@ pub struct SaplingSyncRespawnGuard {
 impl Drop for SaplingSyncRespawnGuard {
     fn drop(&mut self) {
         if let Some((handle, rpc)) = self.sync_handle.take() {
-            *self.abort_handle.lock() = spawn_abortable(light_wallet_db_sync_loop(handle, rpc));
+            *self.abort_handle.lock() = spawn_abortable(light_wallet_db_sync_loop(handle, rpc, None));
         }
     }
 }
@@ -571,6 +648,7 @@ impl SaplingSyncLoopHandle {
         if let Some((_, max_in_wallet)) = extrema {
             from_block = from_block.max(max_in_wallet.into());
         }
+
         if current_block >= from_block {
             rpc.scan_blocks(from_block, current_block, &mut |block: TonicCompactBlock| {
                 block_in_place(|| self.blocks_db.insert_block(block.height as u32, block.encode_to_vec()))
@@ -580,6 +658,7 @@ impl SaplingSyncLoopHandle {
             })
             .await?;
         }
+
         self.current_block = BlockHeight::from_u32(current_block as u32);
         Ok(())
     }
@@ -624,6 +703,8 @@ impl SaplingSyncLoopHandle {
                 None => self.notify_building_wallet_db(0, current_block.into()),
             }
 
+            println!("CURRENT BLOCK: {current_block}");
+
             scan_cached_blocks(
                 &self.consensus_params,
                 &self.blocks_db,
@@ -643,6 +724,63 @@ impl SaplingSyncLoopHandle {
                 self.watch_for_tx = None;
             }
         }
+    }
+
+    /// Finds and caches the earlier block based on the specified start date.
+    ///
+    /// For resource-constrained devices, it would be beneficial to allow the user
+    /// to specify the start date from which to begin syncing Zcoin blocks. The
+    /// challenge lies in obtaining the actual block information with its
+    /// corresponding real block time because we can't fetch the starting block
+    /// based on an arbitrary time. To address this, we can sync backwards from the
+    /// latest block using a defined step/range until we find a block with a
+    /// timestamp earlier than the start date specified. The found block is then
+    /// cached for future use.
+    ///
+    /// # Arguments
+    ///
+    /// * `rpc` - A mutable reference to the ZRpcOps trait object.
+    /// * `start_date` - The start date specified by the user.
+    ///
+    async fn find_and_cache_earlier_block_by_date(
+        &self,
+        rpc: &mut (dyn ZRpcOps + Send),
+        start_date: u32,
+    ) -> Result<(), MmError<UpdateBlocksCacheErr>> {
+        error!("Finding earlier block time than start date: {start_date}");
+        let current_block = rpc.get_block_height().await?;
+        let step = 1000;
+        let mut end_block = current_block;
+        let mut earlier_block = None;
+
+        while end_block > 0 {
+            let start_block = end_block.saturating_sub(step);
+            let blocks = rpc.get_blocks(start_block, end_block).await?;
+
+            for block in blocks.iter().rev() {
+                if block.time < start_date {
+                    error!(
+                        "Found earlier block time than start date: {start_date} - block height: {}",
+                        block.height
+                    );
+                    earlier_block = Some(block.clone());
+                    break;
+                }
+            }
+
+            if earlier_block.is_some() {
+                break;
+            }
+
+            end_block = start_block;
+        }
+
+        if let Some(block) = earlier_block {
+            block_in_place(|| self.blocks_db.insert_block(block.height as u32, block.encode_to_vec()))
+                .map_err(|err| UpdateBlocksCacheErr::ZcashDBError(err.to_string()))?;
+        };
+
+        Ok(())
     }
 }
 
@@ -693,13 +831,31 @@ impl SaplingSyncLoopHandle {
 /// 7. Once the loop is respawned, it will check that broadcast tx is imported (or not available anymore) before stopping in favor of
 ///     next wait_for_gen_tx_blockchain_sync call.
 #[cfg(not(target_arch = "wasm32"))]
-async fn light_wallet_db_sync_loop(mut sync_handle: SaplingSyncLoopHandle, mut client: Box<dyn ZRpcOps + Send>) {
+async fn light_wallet_db_sync_loop(
+    mut sync_handle: SaplingSyncLoopHandle,
+    mut client: Box<dyn ZRpcOps + Send>,
+    start_date: Option<u32>,
+) {
     info!(
         "(Re)starting light_wallet_db_sync_loop for {}, blocks per iteration {}, interval in ms {}",
         sync_handle.coin, sync_handle.scan_blocks_per_iteration, sync_handle.scan_interval_ms
     );
+
     // this loop is spawned as standalone task so it's safe to use block_in_place here
     loop {
+        //         Cache earlier block if start date is specified
+        if let Some(date) = start_date {
+            if let Err(err) = sync_handle
+                .find_and_cache_earlier_block_by_date(client.as_mut(), date)
+                .await
+            {
+                error!("Error {} on finding and caching earlier block", err);
+                sync_handle.notify_on_error(err.to_string());
+                Timer::sleep(10.).await;
+                continue;
+            };
+        }
+
         if let Err(e) = sync_handle.update_blocks_cache(client.as_mut()).await {
             error!("Error {} on blocks cache update", e);
             sync_handle.notify_on_error(e.to_string());
