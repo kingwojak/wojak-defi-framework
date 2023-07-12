@@ -635,6 +635,9 @@ impl SaplingSyncLoopHandle {
     ) -> Result<(), MmError<UpdateBlocksCacheErr>> {
         let current_block = rpc.get_block_height().await?;
         let current_block_in_db = block_in_place(|| self.blocks_db.get_latest_block())?;
+
+        println!("CURRENT BLOCK: {current_block_in_db}");
+
         let wallet_db = self.wallet_db.clone();
         let extrema = block_in_place(|| {
             let conn = wallet_db.db.lock();
@@ -703,8 +706,6 @@ impl SaplingSyncLoopHandle {
                 None => self.notify_building_wallet_db(0, current_block.into()),
             }
 
-            println!("CURRENT BLOCK: {current_block}");
-
             scan_cached_blocks(
                 &self.consensus_params,
                 &self.blocks_db,
@@ -746,8 +747,8 @@ impl SaplingSyncLoopHandle {
         &self,
         rpc: &mut (dyn ZRpcOps + Send),
         start_date: u32,
-    ) -> Result<(), MmError<UpdateBlocksCacheErr>> {
-        error!("Finding earlier block time than start date: {start_date}");
+    ) -> Result<CompactBlock, MmError<UpdateBlocksCacheErr>> {
+        log!("Finding earlier block time than start date: {start_date}");
         let current_block = rpc.get_block_height().await?;
         let step = 1000;
         let mut end_block = current_block;
@@ -755,12 +756,14 @@ impl SaplingSyncLoopHandle {
 
         while end_block > 0 {
             let start_block = end_block.saturating_sub(step);
+            println!("start_block {start_block} end_block {end_block}");
             let blocks = rpc.get_blocks(start_block, end_block).await?;
 
             for block in blocks.iter().rev() {
+                println!("CURRENT HEIGHT: {}", block.height);
                 if block.time < start_date {
-                    error!(
-                        "Found earlier block time than start date: {start_date} - block height: {}",
+                    log!(
+                        "Found header with an earlier block time than start date: {start_date} - block height: {}",
                         block.height
                     );
                     earlier_block = Some(block.clone());
@@ -778,9 +781,12 @@ impl SaplingSyncLoopHandle {
         if let Some(block) = earlier_block {
             block_in_place(|| self.blocks_db.insert_block(block.height as u32, block.encode_to_vec()))
                 .map_err(|err| UpdateBlocksCacheErr::ZcashDBError(err.to_string()))?;
-        };
+            return Ok(block);
+        }
 
-        Ok(())
+        MmError::err(UpdateBlocksCacheErr::InternalError(
+            "Earliest block not found".to_string(),
+        ))
     }
 }
 
@@ -840,22 +846,23 @@ async fn light_wallet_db_sync_loop(
         "(Re)starting light_wallet_db_sync_loop for {}, blocks per iteration {}, interval in ms {}",
         sync_handle.coin, sync_handle.scan_blocks_per_iteration, sync_handle.scan_interval_ms
     );
-
-    // this loop is spawned as standalone task so it's safe to use block_in_place here
-    loop {
-        //         Cache earlier block if start date is specified
-        if let Some(date) = start_date {
-            if let Err(err) = sync_handle
-                .find_and_cache_earlier_block_by_date(client.as_mut(), date)
-                .await
-            {
+    // Cache earlier block if start date is specified
+    if let Some(date) = start_date {
+        match sync_handle
+            .find_and_cache_earlier_block_by_date(client.as_mut(), date)
+            .await
+        {
+            Ok(block) => sync_handle.current_block = BlockHeight::from_u32(block.height as u32),
+            Err(err) => {
                 error!("Error {} on finding and caching earlier block", err);
                 sync_handle.notify_on_error(err.to_string());
                 Timer::sleep(10.).await;
-                continue;
-            };
+            },
         }
+    }
 
+    // this loop is spawned as standalone task so it's safe to use block_in_place here
+    loop {
         if let Err(e) = sync_handle.update_blocks_cache(client.as_mut()).await {
             error!("Error {} on blocks cache update", e);
             sync_handle.notify_on_error(e.to_string());
