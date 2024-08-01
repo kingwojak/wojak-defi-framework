@@ -2,21 +2,24 @@
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
 use crate::utxo::utxo_block_header_storage::BlockHeaderStorage;
-use crate::utxo::{output_script, sat_from_big_decimal, GetBlockHeaderError, GetConfirmedTxError, GetTxError,
-                  GetTxHeightError};
-use crate::{big_decimal_from_sat_unsigned, NumConversError, RpcTransportEventHandler, RpcTransportEventHandlerShared};
+use crate::utxo::{output_script, output_script_p2pk, sat_from_big_decimal, GetBlockHeaderError, GetConfirmedTxError,
+                  GetTxError, GetTxHeightError, NumConversResult, ScripthashNotification};
+use crate::{big_decimal_from_sat_unsigned, MyAddressError, NumConversError, RpcTransportEventHandler,
+            RpcTransportEventHandlerShared};
 use async_trait::async_trait;
-use chain::{BlockHeader, BlockHeaderBits, BlockHeaderNonce, OutPoint, Transaction as UtxoTx};
+use chain::{BlockHeader, BlockHeaderBits, BlockHeaderNonce, OutPoint, Transaction as UtxoTx, TransactionInput,
+            TxHashAlgo};
 use common::custom_futures::{select_ok_sequential, timeout::FutureTimerExt};
-use common::custom_iter::{CollectInto, TryIntoGroupMap};
+use common::custom_iter::TryIntoGroupMap;
 use common::executor::{abortable_queue, abortable_queue::AbortableQueue, AbortableSystem, SpawnFuture, Timer};
 use common::jsonrpc_client::{JsonRpcBatchClient, JsonRpcBatchResponse, JsonRpcClient, JsonRpcError, JsonRpcErrorType,
                              JsonRpcId, JsonRpcMultiClient, JsonRpcRemoteAddr, JsonRpcRequest, JsonRpcRequestEnum,
                              JsonRpcResponse, JsonRpcResponseEnum, JsonRpcResponseFut, RpcRes};
-use common::log::LogOnError;
+use common::log::{debug, LogOnError};
 use common::log::{error, info, warn};
 use common::{median, now_float, now_ms, now_sec, OrdRange};
 use derive_more::Display;
+use enum_derives::EnumFromStringify;
 use futures::channel::oneshot as async_oneshot;
 use futures::compat::{Future01CompatExt, Stream01CompatExt};
 use futures::future::{join_all, FutureExt, TryFutureExt};
@@ -28,12 +31,13 @@ use futures01::{Future, Sink, Stream};
 use http::Uri;
 use itertools::Itertools;
 use keys::hash::H256;
-use keys::{Address, Type as ScriptType};
+use keys::Address;
 use mm2_err_handle::prelude::*;
 use mm2_number::{BigDecimal, BigInt, MmNumber};
 use mm2_rpc::data::legacy::ElectrumProtocol;
 #[cfg(test)] use mocktopus::macros::*;
 use rpc::v1::types::{Bytes as BytesJson, Transaction as RpcTransaction, H256 as H256Json};
+use script::Script;
 use serde_json::{self as json, Value as Json};
 use serialization::{deserialize, serialize, serialize_with_flags, CoinVariant, CompactInteger, Reader,
                     SERIALIZE_TRANSACTION_WITNESS};
@@ -52,6 +56,8 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::ScripthashNotificationSender;
+
 cfg_native! {
     use futures::future::Either;
     use futures::io::Error;
@@ -66,7 +72,6 @@ cfg_native! {
     use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
     use tokio::net::TcpStream;
     use tokio_rustls::{client::TlsStream, TlsConnector};
-    use tokio_rustls::webpki::DnsNameRef;
     use webpki_roots::TLS_SERVER_ROOTS;
 }
 
@@ -111,6 +116,15 @@ impl rustls::client::ServerCertVerifier for NoCertificateVerification {
 pub enum UtxoRpcClientEnum {
     Native(NativeClient),
     Electrum(ElectrumClient),
+}
+
+impl ToString for UtxoRpcClientEnum {
+    fn to_string(&self) -> String {
+        match self {
+            UtxoRpcClientEnum::Native(_) => "native".to_owned(),
+            UtxoRpcClientEnum::Electrum(_) => "electrum".to_owned(),
+        }
+    }
 }
 
 impl From<ElectrumClient> for UtxoRpcClientEnum {
@@ -243,18 +257,33 @@ pub struct UnspentInfo {
     /// The block height transaction mined in.
     /// Note None if the transaction is not mined yet.
     pub height: Option<u64>,
+    /// The script pubkey of the UTXO
+    pub script: Script,
 }
 
-impl From<ElectrumUnspent> for UnspentInfo {
-    fn from(electrum: ElectrumUnspent) -> UnspentInfo {
+impl UnspentInfo {
+    fn from_electrum(unspent: ElectrumUnspent, script: Script) -> UnspentInfo {
         UnspentInfo {
             outpoint: OutPoint {
-                hash: electrum.tx_hash.reversed().into(),
-                index: electrum.tx_pos,
+                hash: unspent.tx_hash.reversed().into(),
+                index: unspent.tx_pos,
             },
-            value: electrum.value,
-            height: electrum.height,
+            value: unspent.value,
+            height: unspent.height,
+            script,
         }
+    }
+
+    fn from_native(unspent: NativeUnspent, decimals: u8, height: Option<u64>) -> NumConversResult<UnspentInfo> {
+        Ok(UnspentInfo {
+            outpoint: OutPoint {
+                hash: unspent.txid.reversed().into(),
+                index: unspent.vout,
+            },
+            value: sat_from_big_decimal(&unspent.amount.to_decimal(), decimals)?,
+            height,
+            script: unspent.script_pub_key.0.into(),
+        })
     }
 }
 
@@ -266,23 +295,26 @@ pub enum BlockHashOrHeight {
 
 #[derive(Debug, PartialEq)]
 pub struct SpentOutputInfo {
-    // The transaction spending the output
-    pub spending_tx: UtxoTx,
-    // The input index that spends the output
+    /// The input that spends the output
+    pub input: TransactionInput,
+    /// The index of spending input
     pub input_index: usize,
-    // The block hash or height the includes the spending transaction
-    // For electrum clients the block height will be returned, for native clients the block hash will be returned
+    /// The transaction spending the output
+    pub spending_tx: UtxoTx,
+    /// The block hash or height the includes the spending transaction
+    /// For electrum clients the block height will be returned, for native clients the block hash will be returned
     pub spent_in_block: BlockHashOrHeight,
 }
 
 pub type UtxoRpcResult<T> = Result<T, MmError<UtxoRpcError>>;
 pub type UtxoRpcFut<T> = Box<dyn Future<Item = T, Error = MmError<UtxoRpcError>> + Send + 'static>;
 
-#[derive(Debug, Display)]
+#[derive(Debug, Display, EnumFromStringify)]
 pub enum UtxoRpcError {
     Transport(JsonRpcError),
     ResponseParseError(JsonRpcError),
     InvalidResponse(String),
+    #[from_stringify("MyAddressError")]
     Internal(String),
 }
 
@@ -304,6 +336,10 @@ impl From<serialization::Error> for UtxoRpcError {
 
 impl From<NumConversError> for UtxoRpcError {
     fn from(e: NumConversError) -> Self { UtxoRpcError::Internal(e.to_string()) }
+}
+
+impl From<keys::Error> for UtxoRpcError {
+    fn from(e: keys::Error) -> Self { UtxoRpcError::Internal(e.to_string()) }
 }
 
 impl UtxoRpcError {
@@ -345,6 +381,8 @@ pub trait UtxoRpcClientOps: fmt::Debug + Send + Sync + 'static {
     /// Submits the raw `tx` transaction (serialized, hex-encoded) to blockchain network.
     fn send_raw_transaction(&self, tx: BytesJson) -> UtxoRpcFut<H256Json>;
 
+    fn blockchain_scripthash_subscribe(&self, scripthash: String) -> UtxoRpcFut<Json>;
+
     /// Returns raw transaction (serialized, hex-encoded) by the given `txid`.
     fn get_transaction_bytes(&self, txid: &H256Json) -> UtxoRpcFut<BytesJson>;
 
@@ -383,6 +421,7 @@ pub trait UtxoRpcClientOps: fmt::Debug + Send + Sync + 'static {
         script_pubkey: &[u8],
         vout: usize,
         from_block: BlockHashOrHeight,
+        tx_hash_algo: TxHashAlgo,
     ) -> Box<dyn Future<Item = Option<SpentOutputInfo>, Error = String> + Send>;
 
     /// Get median time past for `count` blocks in the past including `starting_block`
@@ -701,12 +740,12 @@ impl JsonRpcClient for NativeClientImpl {
             .body(Vec::from(request_body))
             .map_err(|e| JsonRpcErrorType::InvalidRequest(e.to_string())));
 
-        let event_handles = self.event_handlers.clone();
+        let event_handlers = self.event_handlers.clone();
         Box::new(slurp_req(http_request).boxed().compat().then(
             move |result| -> Result<(JsonRpcRemoteAddr, JsonRpcResponseEnum), JsonRpcErrorType> {
                 let res = result.map_err(|e| e.into_inner())?;
                 // measure now only body length, because the `hyper` crate doesn't allow to get total HTTP packet length
-                event_handles.on_incoming_response(&res.2);
+                event_handlers.on_incoming_response(&res.2);
 
                 let body =
                     std::str::from_utf8(&res.2).map_err(|e| JsonRpcErrorType::parse_error(&uri, e.to_string()))?;
@@ -735,20 +774,10 @@ impl UtxoRpcClientOps for NativeClient {
             .list_unspent_impl(0, std::i32::MAX, vec![address.to_string()])
             .map_to_mm_fut(UtxoRpcError::from)
             .and_then(move |unspents| {
-                let unspents: UtxoRpcResult<Vec<_>> = unspents
-                    .into_iter()
-                    .map(|unspent| {
-                        Ok(UnspentInfo {
-                            outpoint: OutPoint {
-                                hash: unspent.txid.reversed().into(),
-                                index: unspent.vout,
-                            },
-                            value: sat_from_big_decimal(&unspent.amount.to_decimal(), decimals)?,
-                            height: None,
-                        })
-                    })
-                    .collect();
                 unspents
+                    .into_iter()
+                    .map(|unspent| Ok(UnspentInfo::from_native(unspent, decimals, None)?))
+                    .collect::<UtxoRpcResult<_>>()
             });
         Box::new(fut)
     }
@@ -776,14 +805,7 @@ impl UtxoRpcClientOps for NativeClient {
                                 UtxoRpcError::InvalidResponse(format!("Unexpected address '{}'", unspent.address))
                             })?
                             .clone();
-                        let unspent_info = UnspentInfo {
-                            outpoint: OutPoint {
-                                hash: unspent.txid.reversed().into(),
-                                index: unspent.vout,
-                            },
-                            value: sat_from_big_decimal(&unspent.amount.to_decimal(), decimals)?,
-                            height: None,
-                        };
+                        let unspent_info = UnspentInfo::from_native(unspent, decimals, None)?;
                         Ok((orig_address, unspent_info))
                     })
                     // Collect `(Address, UnspentInfo)` items into `HashMap<Address, Vec<UnspentInfo>>` grouped by the addresses.
@@ -804,6 +826,13 @@ impl UtxoRpcClientOps for NativeClient {
     /// https://developer.bitcoin.org/reference/rpc/sendrawtransaction
     fn send_raw_transaction(&self, tx: BytesJson) -> UtxoRpcFut<H256Json> {
         Box::new(rpc_func!(self, "sendrawtransaction", tx).map_to_mm_fut(UtxoRpcError::from))
+    }
+
+    fn blockchain_scripthash_subscribe(&self, _scripthash: String) -> UtxoRpcFut<Json> {
+        Box::new(futures01::future::err(
+            UtxoRpcError::Internal("blockchain_scripthash_subscribe` is not supported for Native Clients".to_owned())
+                .into(),
+        ))
     }
 
     fn get_transaction_bytes(&self, txid: &H256Json) -> UtxoRpcFut<BytesJson> {
@@ -885,6 +914,7 @@ impl UtxoRpcClientOps for NativeClient {
         _script_pubkey: &[u8],
         vout: usize,
         from_block: BlockHashOrHeight,
+        tx_hash_algo: TxHashAlgo,
     ) -> Box<dyn Future<Item = Option<SpentOutputInfo>, Error = String> + Send> {
         let selfi = self.clone();
         let fut = async move {
@@ -899,14 +929,17 @@ impl UtxoRpcClientOps for NativeClient {
                 .filter(|tx| !tx.is_conflicting())
             {
                 let maybe_spend_tx_bytes = try_s!(selfi.get_raw_transaction_bytes(&transaction.txid).compat().await);
-                let maybe_spend_tx: UtxoTx =
+                let mut maybe_spend_tx: UtxoTx =
                     try_s!(deserialize(maybe_spend_tx_bytes.as_slice()).map_err(|e| ERRL!("{:?}", e)));
+                maybe_spend_tx.tx_hash_algo = tx_hash_algo;
+                drop_mutability!(maybe_spend_tx);
 
                 for (index, input) in maybe_spend_tx.inputs.iter().enumerate() {
                     if input.previous_output.hash == tx_hash && input.previous_output.index == vout as u32 {
                         return Ok(Some(SpentOutputInfo {
-                            spending_tx: maybe_spend_tx,
+                            input: input.clone(),
                             input_index: index,
+                            spending_tx: maybe_spend_tx,
                             spent_in_block: BlockHashOrHeight::Hash(transaction.blockhash),
                         }));
                     }
@@ -1432,12 +1465,21 @@ fn addr_to_socket_addr(input: &str) -> Result<SocketAddr, String> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn server_name_from_domain(dns_name: &str) -> Result<ServerName, String> {
+    match ServerName::try_from(dns_name) {
+        Ok(dns_name) if matches!(dns_name, ServerName::DnsName(_)) => Ok(dns_name),
+        _ => ERR!("Couldn't parse DNS name from '{}'", dns_name),
+    }
+}
+
 /// Attempts to process the request (parse url, etc), build up the config and create new electrum connection
 /// The function takes `abortable_system` that will be used to spawn Electrum's related futures.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn spawn_electrum(
     req: &ElectrumRpcRequest,
     event_handlers: Vec<RpcTransportEventHandlerShared>,
+    scripthash_notification_sender: &ScripthashNotificationSender,
     abortable_system: AbortableQueue,
 ) -> Result<ElectrumConnection, String> {
     let config = match req.protocol {
@@ -1448,8 +1490,7 @@ pub fn spawn_electrum(
                 .host()
                 .ok_or(ERRL!("Couldn't retrieve host from addr {}", req.url))?;
 
-            // check the dns name
-            try_s!(DnsNameRef::try_from_ascii_str(host));
+            try_s!(server_name_from_domain(host));
 
             ElectrumConfig::SSL {
                 dns_name: host.into(),
@@ -1465,6 +1506,7 @@ pub fn spawn_electrum(
         req.url.clone(),
         config,
         event_handlers,
+        scripthash_notification_sender,
         abortable_system,
     ))
 }
@@ -1475,6 +1517,7 @@ pub fn spawn_electrum(
 pub fn spawn_electrum(
     req: &ElectrumRpcRequest,
     event_handlers: Vec<RpcTransportEventHandlerShared>,
+    scripthash_notification_sender: &ScripthashNotificationSender,
     abortable_system: AbortableQueue,
 ) -> Result<ElectrumConnection, String> {
     let mut url = req.url.clone();
@@ -1503,7 +1546,13 @@ pub fn spawn_electrum(
         },
     };
 
-    Ok(electrum_connect(url, config, event_handlers, abortable_system))
+    Ok(electrum_connect(
+        url,
+        config,
+        event_handlers,
+        scripthash_notification_sender,
+        abortable_system,
+    ))
 }
 
 /// Represents the active Electrum connection to selected address
@@ -1611,6 +1660,10 @@ pub struct ElectrumClientImpl {
     /// Please also note that this abortable system is a subsystem of [`UtxoCoinFields::abortable_system`].
     abortable_system: AbortableQueue,
     negotiate_version: bool,
+    /// This is used for balance event streaming implementation for UTXOs.
+    /// If balance event streaming isn't enabled, this value will always be `None`; otherwise,
+    /// it will be used for sending scripthash messages to trigger re-connections, re-fetching the balances, etc.
+    pub(crate) scripthash_notification_sender: ScripthashNotificationSender,
 }
 
 async fn electrum_request_multi(
@@ -1700,7 +1753,12 @@ impl ElectrumClientImpl {
     /// Create an Electrum connection and spawn a green thread actor to handle it.
     pub async fn add_server(&self, req: &ElectrumRpcRequest) -> Result<(), String> {
         let subsystem = try_s!(self.abortable_system.create_subsystem());
-        let connection = try_s!(spawn_electrum(req, self.event_handlers.clone(), subsystem));
+        let connection = try_s!(spawn_electrum(
+            req,
+            self.event_handlers.clone(),
+            &self.scripthash_notification_sender,
+            subsystem,
+        ));
         self.connections.lock().await.push(connection);
         Ok(())
     }
@@ -1757,6 +1815,13 @@ impl ElectrumClientImpl {
             .find(|con| con.addr == server_addr)
             .ok_or(ERRL!("Unknown electrum address {}", server_addr))?;
         con.set_protocol_version(version).await;
+
+        if let Some(sender) = &self.scripthash_notification_sender {
+            sender
+                .unbounded_send(ScripthashNotification::RefreshSubscriptions)
+                .map_err(|e| ERRL!("Failed sending scripthash message. {}", e))?;
+        }
+
         Ok(())
     }
 
@@ -1786,6 +1851,8 @@ impl Deref for ElectrumClient {
 }
 
 const BLOCKCHAIN_HEADERS_SUB_ID: &str = "blockchain.headers.subscribe";
+
+const BLOCKCHAIN_SCRIPTHASH_SUB_ID: &str = "blockchain.scripthash.subscribe";
 
 impl UtxoJsonRpcClientInfo for ElectrumClient {
     fn coin_name(&self) -> &str { self.coin_ticker.as_str() }
@@ -2104,7 +2171,7 @@ impl ElectrumClient {
                             Ok(headers) => headers,
                             Err(e) => return MmError::err(UtxoRpcError::InvalidResponse(format!("{:?}", e))),
                         };
-                        let mut block_registry: HashMap<u64, BlockHeader> = HashMap::new();
+                        let mut block_registry: HashMap<u64, BlockHeader> = HashMap::with_capacity(block_headers.len());
                         let mut starting_height = from_height;
                         for block_header in &block_headers {
                             block_registry.insert(starting_height, block_header.clone());
@@ -2154,10 +2221,10 @@ impl ElectrumClient {
                 return Ok((servers_with_max_count, *max_block_count));
             }
 
-            return Err(MmError::new(UtxoRpcError::Internal(format!(
+            Err(MmError::new(UtxoRpcError::Internal(format!(
                 "Couldn't get block count from any server for {}, responses: {:?}",
                 &selfi.coin_ticker, responses
-            ))));
+            ))))
         };
 
         Box::new(fut.boxed().compat())
@@ -2169,48 +2236,67 @@ impl ElectrumClient {
 #[cfg_attr(test, mockable)]
 impl UtxoRpcClientOps for ElectrumClient {
     fn list_unspent(&self, address: &Address, _decimals: u8) -> UtxoRpcFut<Vec<UnspentInfo>> {
-        let script = output_script(address, ScriptType::P2PKH);
-        let script_hash = electrum_script_hash(&script);
-        Box::new(
-            self.scripthash_list_unspent(&hex::encode(script_hash))
-                .map_to_mm_fut(UtxoRpcError::from)
-                .map(move |unspents| {
-                    unspents
-                        .iter()
-                        .map(|unspent| UnspentInfo {
-                            outpoint: OutPoint {
-                                hash: unspent.tx_hash.reversed().into(),
-                                index: unspent.tx_pos,
-                            },
-                            value: unspent.value,
-                            height: unspent.height,
-                        })
-                        .collect()
-                }),
-        )
-    }
+        let mut output_scripts = vec![try_f!(output_script(address))];
 
-    fn list_unspent_group(&self, addresses: Vec<Address>, _decimals: u8) -> UtxoRpcFut<UnspentMap> {
-        let script_hashes = addresses
-            .iter()
-            .map(|addr| {
-                let script = output_script(addr, ScriptType::P2PKH);
-                let script_hash = electrum_script_hash(&script);
-                hex::encode(script_hash)
-            })
-            .collect();
+        // If the plain pubkey is available, fetch the UTXOs found in P2PK outputs as well (if any).
+        if let Some(pubkey) = address.pubkey() {
+            let p2pk_output_script = output_script_p2pk(pubkey);
+            output_scripts.push(p2pk_output_script);
+        }
 
         let this = self.clone();
         let fut = async move {
-            let unspents = this.scripthash_list_unspent_batch(script_hashes).compat().await?;
+            let hashes = output_scripts
+                .iter()
+                .map(|s| hex::encode(electrum_script_hash(s)))
+                .collect();
+            let unspents = this.scripthash_list_unspent_batch(hashes).compat().await?;
+
+            let unspents = unspents
+                .into_iter()
+                .zip(output_scripts)
+                .flat_map(|(unspents, output_script)| {
+                    unspents
+                        .into_iter()
+                        .map(move |unspent| UnspentInfo::from_electrum(unspent, output_script.clone()))
+                })
+                .collect();
+            Ok(unspents)
+        };
+
+        Box::new(fut.boxed().compat())
+    }
+
+    fn list_unspent_group(&self, addresses: Vec<Address>, _decimals: u8) -> UtxoRpcFut<UnspentMap> {
+        let output_scripts = try_f!(addresses
+            .iter()
+            .map(output_script)
+            .collect::<Result<Vec<_>, keys::Error>>());
+
+        let this = self.clone();
+        let fut = async move {
+            let hashes = output_scripts
+                .iter()
+                .map(|s| hex::encode(electrum_script_hash(s)))
+                .collect();
+            let unspents = this.scripthash_list_unspent_batch(hashes).compat().await?;
+
+            let unspents: Vec<Vec<UnspentInfo>> = unspents
+                .into_iter()
+                .zip(output_scripts)
+                .map(|(unspents, output_script)| {
+                    unspents
+                        .into_iter()
+                        .map(|unspent| UnspentInfo::from_electrum(unspent, output_script.clone()))
+                        .collect()
+                })
+                .collect();
 
             let unspent_map = addresses
                 .into_iter()
                 // `scripthash_list_unspent_batch` returns `ScriptHashUnspents` elements in the same order in which they were requested.
                 // So we can zip `addresses` and `unspents` into one iterator.
                 .zip(unspents)
-                // Map `(Address, Vec<ElectrumUnspent>)` pairs into `(Address, Vec<UnspentInfo>)`.
-                .map(|(address, electrum_unspents)| (address, electrum_unspents.collect_into()))
                 .collect();
             Ok(unspent_map)
         };
@@ -2234,6 +2320,10 @@ impl UtxoRpcClientOps for ElectrumClient {
             self.blockchain_transaction_broadcast(tx)
                 .map_to_mm_fut(UtxoRpcError::from),
         )
+    }
+
+    fn blockchain_scripthash_subscribe(&self, scripthash: String) -> UtxoRpcFut<Json> {
+        Box::new(rpc_func!(self, BLOCKCHAIN_SCRIPTHASH_SUB_ID, scripthash).map_to_mm_fut(UtxoRpcError::from))
     }
 
     /// https://electrumx.readthedocs.io/en/latest/protocol-methods.html#blockchain-transaction-get
@@ -2269,21 +2359,45 @@ impl UtxoRpcClientOps for ElectrumClient {
     }
 
     fn display_balance(&self, address: Address, decimals: u8) -> RpcRes<BigDecimal> {
-        let hash = electrum_script_hash(&output_script(&address, ScriptType::P2PKH));
-        let hash_str = hex::encode(hash);
-        Box::new(
-            self.scripthash_get_balance(&hash_str)
-                .map(move |electrum_balance| electrum_balance.to_big_decimal(decimals)),
-        )
+        let output_script = try_f!(output_script(&address).map_err(|err| JsonRpcError::new(
+            UtxoJsonRpcClientInfo::client_info(self),
+            rpc_req!(self, "blockchain.scripthash.get_balance").into(),
+            JsonRpcErrorType::Internal(err.to_string())
+        )));
+        let mut hashes = vec![hex::encode(electrum_script_hash(&output_script))];
+
+        // If the plain pubkey is available, fetch the balance found in P2PK output as well (if any).
+        if let Some(pubkey) = address.pubkey() {
+            let p2pk_output_script = output_script_p2pk(pubkey);
+            hashes.push(hex::encode(electrum_script_hash(&p2pk_output_script)));
+        }
+
+        let this = self.clone();
+        let fut = async move {
+            Ok(this
+                .scripthash_get_balances(hashes)
+                .compat()
+                .await?
+                .into_iter()
+                .fold(BigDecimal::from(0), |sum, electrum_balance| {
+                    sum + electrum_balance.to_big_decimal(decimals)
+                }))
+        };
+        Box::new(fut.boxed().compat())
     }
 
     fn display_balances(&self, addresses: Vec<Address>, decimals: u8) -> UtxoRpcFut<Vec<(Address, BigDecimal)>> {
         let this = self.clone();
         let fut = async move {
-            let hashes = addresses.iter().map(|address| {
-                let hash = electrum_script_hash(&output_script(address, ScriptType::P2PKH));
-                hex::encode(hash)
-            });
+            let hashes = addresses
+                .iter()
+                .map(|address| {
+                    let output_script = output_script(address)?;
+                    let hash = electrum_script_hash(&output_script);
+
+                    Ok(hex::encode(hash))
+                })
+                .collect::<Result<Vec<_>, keys::Error>>()?;
 
             let electrum_balances = this.scripthash_get_balances(hashes).compat().await?;
             let balances = electrum_balances
@@ -2323,6 +2437,7 @@ impl UtxoRpcClientOps for ElectrumClient {
         script_pubkey: &[u8],
         vout: usize,
         _from_block: BlockHashOrHeight,
+        tx_hash_algo: TxHashAlgo,
     ) -> Box<dyn Future<Item = Option<SpentOutputInfo>, Error = String> + Send> {
         let selfi = self.clone();
         let script_hash = hex::encode(electrum_script_hash(script_pubkey));
@@ -2336,13 +2451,17 @@ impl UtxoRpcClientOps for ElectrumClient {
             for item in history.iter() {
                 let transaction = try_s!(selfi.get_transaction_bytes(&item.tx_hash).compat().await);
 
-                let maybe_spend_tx: UtxoTx = try_s!(deserialize(transaction.as_slice()).map_err(|e| ERRL!("{:?}", e)));
+                let mut maybe_spend_tx: UtxoTx =
+                    try_s!(deserialize(transaction.as_slice()).map_err(|e| ERRL!("{:?}", e)));
+                maybe_spend_tx.tx_hash_algo = tx_hash_algo;
+                drop_mutability!(maybe_spend_tx);
 
                 for (index, input) in maybe_spend_tx.inputs.iter().enumerate() {
                     if input.previous_output.hash == tx_hash && input.previous_output.index == vout as u32 {
                         return Ok(Some(SpentOutputInfo {
-                            spending_tx: maybe_spend_tx,
+                            input: input.clone(),
                             input_index: index,
+                            spending_tx: maybe_spend_tx,
                             spent_in_block: BlockHashOrHeight::Height(item.height),
                         }));
                     }
@@ -2396,6 +2515,7 @@ impl ElectrumClientImpl {
         block_headers_storage: BlockHeaderStorage,
         abortable_system: AbortableQueue,
         negotiate_version: bool,
+        scripthash_notification_sender: ScripthashNotificationSender,
     ) -> ElectrumClientImpl {
         let protocol_version = OrdRange::new(1.2, 1.4).unwrap();
         ElectrumClientImpl {
@@ -2409,6 +2529,7 @@ impl ElectrumClientImpl {
             block_headers_storage,
             abortable_system,
             negotiate_version,
+            scripthash_notification_sender,
         }
     }
 
@@ -2419,6 +2540,7 @@ impl ElectrumClientImpl {
         protocol_version: OrdRange<f32>,
         block_headers_storage: BlockHeaderStorage,
         abortable_system: AbortableQueue,
+        scripthash_notification_sender: ScripthashNotificationSender,
     ) -> ElectrumClientImpl {
         ElectrumClientImpl {
             protocol_version,
@@ -2428,6 +2550,7 @@ impl ElectrumClientImpl {
                 block_headers_storage,
                 abortable_system,
                 false,
+                scripthash_notification_sender,
             )
         }
     }
@@ -2438,17 +2561,25 @@ fn rx_to_stream(rx: mpsc::Receiver<Vec<u8>>) -> impl Stream<Item = Vec<u8>, Erro
     rx.map_err(|_| panic!("errors not possible on rx"))
 }
 
-async fn electrum_process_json(raw_json: Json, arc: &JsonRpcPendingRequestsShared) {
+async fn electrum_process_json(
+    raw_json: Json,
+    arc: &JsonRpcPendingRequestsShared,
+    scripthash_notification_sender: &ScripthashNotificationSender,
+) {
     // detect if we got standard JSONRPC response or subscription response as JSONRPC request
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum ElectrumRpcResponseEnum {
+        /// The subscription response as JSONRPC request.
+        ///
+        /// NOTE Because JsonRpcResponse uses default values for each of its field,
+        /// this variant has to stay at top in this enumeration to be properly deserialized
+        /// from serde.
+        SubscriptionNotification(JsonRpcRequest),
         /// The standard JSONRPC single response.
         SingleResponse(JsonRpcResponse),
         /// The batch of standard JSONRPC responses.
         BatchResponses(JsonRpcBatchResponse),
-        /// The subscription response as JSONRPC request.
-        SubscriptionNotification(JsonRpcRequest),
     }
 
     let response: ElectrumRpcResponseEnum = match json::from_value(raw_json) {
@@ -2465,6 +2596,25 @@ async fn electrum_process_json(raw_json: Json, arc: &JsonRpcPendingRequestsShare
         ElectrumRpcResponseEnum::SubscriptionNotification(req) => {
             let id = match req.method.as_ref() {
                 BLOCKCHAIN_HEADERS_SUB_ID => BLOCKCHAIN_HEADERS_SUB_ID,
+                BLOCKCHAIN_SCRIPTHASH_SUB_ID => {
+                    let scripthash = match req.params.first() {
+                        Some(t) => t.as_str().unwrap_or_default(),
+                        None => {
+                            debug!("Notification must contain the scripthash value.");
+                            return;
+                        },
+                    };
+
+                    if let Some(sender) = scripthash_notification_sender {
+                        debug!("Sending scripthash message");
+                        if let Err(e) = sender.unbounded_send(ScripthashNotification::Triggered(scripthash.to_string()))
+                        {
+                            error!("Failed sending scripthash message. {e}");
+                            return;
+                        };
+                    };
+                    BLOCKCHAIN_SCRIPTHASH_SUB_ID
+                },
                 _ => {
                     error!("Couldn't get id of request {:?}", req);
                     return;
@@ -2487,7 +2637,11 @@ async fn electrum_process_json(raw_json: Json, arc: &JsonRpcPendingRequestsShare
     }
 }
 
-async fn electrum_process_chunk(chunk: &[u8], arc: &JsonRpcPendingRequestsShared) {
+async fn electrum_process_chunk(
+    chunk: &[u8],
+    arc: &JsonRpcPendingRequestsShared,
+    scripthash_notification_sender: ScripthashNotificationSender,
+) {
     // we should split the received chunk because we can get several responses in 1 chunk.
     let split = chunk.split(|item| *item == b'\n');
     for chunk in split {
@@ -2500,7 +2654,7 @@ async fn electrum_process_chunk(chunk: &[u8], arc: &JsonRpcPendingRequestsShared
                     return;
                 },
             };
-            electrum_process_json(raw_json, arc).await
+            electrum_process_json(raw_json, arc, &scripthash_notification_sender).await
         }
     }
 }
@@ -2596,9 +2750,8 @@ async fn electrum_last_chunk_loop(last_chunk: Arc<AtomicU64>) {
 fn rustls_client_config(unsafe_conf: bool) -> Arc<ClientConfig> {
     let mut cert_store = RootCertStore::empty();
 
-    cert_store.add_server_trust_anchors(
+    cert_store.add_trust_anchors(
         TLS_SERVER_ROOTS
-            .0
             .iter()
             .map(|ta| OwnedTrustAnchor::from_subject_spki_name_constraints(ta.subject, ta.spki, ta.name_constraints)),
     );
@@ -2629,6 +2782,7 @@ async fn connect_loop<Spawner: SpawnFuture>(
     responses: JsonRpcPendingRequestsShared,
     connection_tx: Arc<AsyncMutex<Option<mpsc::Sender<Vec<u8>>>>>,
     event_handlers: Vec<RpcTransportEventHandlerShared>,
+    scripthash_notification_sender: ScripthashNotificationSender,
     _spawner: Spawner,
 ) -> Result<(), ()> {
     let delay = Arc::new(AtomicU64::new(0));
@@ -2639,7 +2793,9 @@ async fn connect_loop<Spawner: SpawnFuture>(
             Timer::sleep(current_delay as f64).await;
         };
 
-        let socket_addr = try_loop!(addr_to_socket_addr(&addr), addr, delay);
+        let socket_addr = addr_to_socket_addr(&addr).map_err(|e| {
+            error!("{:?} error {:?}", addr, e);
+        })?;
 
         let connect_f = match config.clone() {
             ElectrumConfig::TCP => Either::Left(TcpStream::connect(&socket_addr).map_ok(ElectrumStream::Tcp)),
@@ -2652,14 +2808,15 @@ async fn connect_loop<Spawner: SpawnFuture>(
                 } else {
                     TlsConnector::from(SAFE_TLS_CONFIG.clone())
                 };
+                // The address should always be correct since we checked it beforehand in initializaiton.
+                let dns = server_name_from_domain(dns_name.as_str()).map_err(|e| {
+                    error!("{:?} error {:?}", addr, e);
+                })?;
 
-                Either::Right(TcpStream::connect(&socket_addr).and_then(move |stream| {
-                    // Can use `unwrap` cause `dns_name` is pre-checked.
-                    let dns = ServerName::try_from(dns_name.as_str())
-                        .map_err(|e| format!("{:?}", e))
-                        .unwrap();
-                    tls_connector.connect(dns, stream).map_ok(ElectrumStream::Tls)
-                }))
+                Either::Right(
+                    TcpStream::connect(&socket_addr)
+                        .and_then(move |stream| tls_connector.connect(dns, stream).map_ok(ElectrumStream::Tls)),
+                )
             },
         };
 
@@ -2682,6 +2839,7 @@ async fn connect_loop<Spawner: SpawnFuture>(
             let delay = delay.clone();
             let addr = addr.clone();
             let responses = responses.clone();
+            let scripthash_notification_sender = scripthash_notification_sender.clone();
             let event_handlers = event_handlers.clone();
             async move {
                 let mut buffer = String::with_capacity(1024);
@@ -2705,7 +2863,7 @@ async fn connect_loop<Spawner: SpawnFuture>(
                     event_handlers.on_incoming_response(buffer.as_bytes());
                     last_chunk.store(now_ms(), AtomicOrdering::Relaxed);
 
-                    electrum_process_chunk(buffer.as_bytes(), &responses).await;
+                    electrum_process_chunk(buffer.as_bytes(), &responses, scripthash_notification_sender.clone()).await;
                     buffer.clear();
                 }
             }
@@ -2749,6 +2907,7 @@ async fn connect_loop<Spawner: SpawnFuture>(
     responses: JsonRpcPendingRequestsShared,
     connection_tx: Arc<AsyncMutex<Option<mpsc::Sender<Vec<u8>>>>>,
     event_handlers: Vec<RpcTransportEventHandlerShared>,
+    scripthash_notification_sender: ScripthashNotificationSender,
     spawner: Spawner,
 ) -> Result<(), ()> {
     use std::sync::atomic::AtomicUsize;
@@ -2757,7 +2916,7 @@ async fn connect_loop<Spawner: SpawnFuture>(
         static ref CONN_IDX: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
     }
 
-    use mm2_net::wasm_ws::ws_transport;
+    use mm2_net::wasm::wasm_ws::ws_transport;
 
     let delay = Arc::new(AtomicU64::new(0));
     loop {
@@ -2783,6 +2942,7 @@ async fn connect_loop<Spawner: SpawnFuture>(
             let delay = delay.clone();
             let addr = addr.clone();
             let responses = responses.clone();
+            let scripthash_notification_sender = scripthash_notification_sender.clone();
             let event_handlers = event_handlers.clone();
             async move {
                 while let Some(incoming_res) = transport_rx.next().await {
@@ -2795,7 +2955,7 @@ async fn connect_loop<Spawner: SpawnFuture>(
                             let incoming_str = incoming_json.to_string();
                             event_handlers.on_incoming_response(incoming_str.as_bytes());
 
-                            electrum_process_json(incoming_json, &responses).await;
+                            electrum_process_json(incoming_json, &responses, &scripthash_notification_sender).await;
                         },
                         Err(e) => {
                             error!("{} error: {:?}", addr, e);
@@ -2855,6 +3015,7 @@ fn electrum_connect(
     addr: String,
     config: ElectrumConfig,
     event_handlers: Vec<RpcTransportEventHandlerShared>,
+    scripthash_notification_sender: &ScripthashNotificationSender,
     abortable_system: AbortableQueue,
 ) -> ElectrumConnection {
     let responses = Arc::new(AsyncMutex::new(JsonRpcPendingRequests::default()));
@@ -2867,6 +3028,7 @@ fn electrum_connect(
         responses.clone(),
         tx.clone(),
         event_handlers,
+        scripthash_notification_sender.clone(),
         spawner.clone(),
     )
     .then(|_| futures::future::ready(()));

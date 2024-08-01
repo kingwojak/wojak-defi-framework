@@ -4,7 +4,7 @@ use crate::nft::nft_structs::{Chain, NftFromMoralis, NftListFilters, NftTransfer
                               SpamContractRes, TransferMeta, UriMeta};
 use crate::nft::storage::db_test_helpers::{get_nft_ctx, nft, nft_list, nft_transfer_history};
 use crate::nft::storage::{NftListStorageOps, NftTransferHistoryStorageOps, RemoveNftResult};
-use crate::nft::{check_moralis_ipfs_bafy, get_domain_from_url, process_metadata_for_spam_link,
+use crate::nft::{check_moralis_ipfs_bafy, get_domain_from_url, is_malicious, process_metadata_for_spam_link,
                  process_text_for_spam_link};
 use common::cross_test;
 use ethereum_types::Address;
@@ -27,8 +27,16 @@ use mm2_net::native_http::send_request_to_uri;
 common::cfg_wasm32! {
     use wasm_bindgen_test::*;
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
-    use mm2_net::wasm_http::send_request_to_uri;
+    use mm2_net::wasm::http::send_request_to_uri;
 }
+
+cross_test!(test_is_malicious, {
+    let token_uri = "https://btrgtrhbyjuyj.xyz/BABYDOGE.json";
+    assert!(is_malicious(token_uri).unwrap());
+
+    let token_uri1 = "https://btrgtrhbyjuyj.com/BABYDOGE.json%00";
+    assert!(is_malicious(token_uri1).unwrap());
+});
 
 cross_test!(test_moralis_ipfs_bafy, {
     let uri = "https://ipfs.moralis.io:2053/ipfs/bafybeifnek24coy5xj5qabdwh24dlp5omq34nzgvazkfyxgnqms4eidsiq/1.json";
@@ -86,7 +94,7 @@ cross_test!(test_moralis_requests, {
         "{}/{}/nft?chain=POLYGON&format=decimal",
         MORALIS_API_ENDPOINT_TEST, TEST_WALLET_ADDR_EVM
     );
-    let response_nft_list = send_request_to_uri(uri_nft_list.as_str()).await.unwrap();
+    let response_nft_list = send_request_to_uri(uri_nft_list.as_str(), None).await.unwrap();
     let nfts_list = response_nft_list["result"].as_array().unwrap();
     for nft_json in nfts_list {
         let nft_moralis: NftFromMoralis = serde_json::from_str(&nft_json.to_string()).unwrap();
@@ -97,7 +105,7 @@ cross_test!(test_moralis_requests, {
         "{}/{}/nft/transfers?chain=POLYGON&format=decimal",
         MORALIS_API_ENDPOINT_TEST, TEST_WALLET_ADDR_EVM
     );
-    let response_transfer_history = send_request_to_uri(uri_history.as_str()).await.unwrap();
+    let response_transfer_history = send_request_to_uri(uri_history.as_str(), None).await.unwrap();
     let mut transfer_list = response_transfer_history["result"].as_array().unwrap().clone();
     assert!(!transfer_list.is_empty());
     let first_transfer = transfer_list.remove(transfer_list.len() - 1);
@@ -111,9 +119,9 @@ cross_test!(test_moralis_requests, {
         "{}/nft/0xed55e4477b795eaa9bb4bca24df42214e1a05c18/1111777?chain=POLYGON&format=decimal",
         MORALIS_API_ENDPOINT_TEST
     );
-    let response_meta = send_request_to_uri(uri_meta.as_str()).await.unwrap();
+    let response_meta = send_request_to_uri(uri_meta.as_str(), None).await.unwrap();
     let nft_moralis: NftFromMoralis = serde_json::from_str(&response_meta.to_string()).unwrap();
-    assert_eq!(41237364, *nft_moralis.block_number_minted.unwrap());
+    assert_eq!(42563567, nft_moralis.block_number.0);
 });
 
 cross_test!(test_antispam_scan_endpoints, {
@@ -147,7 +155,7 @@ cross_test!(test_antispam_scan_endpoints, {
 cross_test!(test_camo, {
     let hex_token_uri = hex::encode("https://tikimetadata.s3.amazonaws.com/tiki_box.json");
     let uri_decode = format!("{}/url/decode/{}", BLOCKLIST_API_ENDPOINT, hex_token_uri);
-    let decode_res = send_request_to_uri(&uri_decode).await.unwrap();
+    let decode_res = send_request_to_uri(&uri_decode, None).await.unwrap();
     let uri_meta: UriMeta = serde_json::from_value(decode_res).unwrap();
     assert_eq!(
         uri_meta.raw_image_url.unwrap(),
@@ -395,6 +403,48 @@ cross_test!(test_exclude_nft_phishing_spam, {
     assert_eq!(nfts.len(), 2);
 });
 
+cross_test!(test_clear_nft, {
+    let chain = Chain::Bsc;
+    let nft_ctx = get_nft_ctx(&chain).await;
+    let storage = nft_ctx.lock_db().await.unwrap();
+    NftListStorageOps::init(&storage, &chain).await.unwrap();
+    let nft = nft();
+    storage.add_nfts_to_list(chain, vec![nft], 28056726).await.unwrap();
+
+    storage.clear_nft_data(&chain).await.unwrap();
+    test_clear_nft_target(&storage, &chain).await;
+});
+
+cross_test!(test_clear_all_nft, {
+    let chain = Chain::Bsc;
+    let nft_ctx = get_nft_ctx(&chain).await;
+    let storage = nft_ctx.lock_db().await.unwrap();
+    NftListStorageOps::init(&storage, &chain).await.unwrap();
+    let nft = nft();
+    storage.add_nfts_to_list(chain, vec![nft], 28056726).await.unwrap();
+
+    storage.clear_all_nft_data().await.unwrap();
+    test_clear_nft_target(&storage, &chain).await;
+});
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn test_clear_nft_target<S: NftListStorageOps>(storage: &S, chain: &Chain) {
+    let is_initialized = NftListStorageOps::is_initialized(storage, chain).await.unwrap();
+    assert!(!is_initialized);
+
+    let is_err = storage.get_nft_list(vec![*chain], false, 10, None, None).await.is_err();
+    assert!(is_err);
+
+    let is_err = storage.get_last_scanned_block(chain).await.is_err();
+    assert!(is_err);
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn test_clear_nft_target<S: NftListStorageOps>(storage: &S, chain: &Chain) {
+    let nft_list = storage.get_nft_list(vec![*chain], true, 1, None, None).await.unwrap();
+    assert!(nft_list.nfts.is_empty());
+}
+
 cross_test!(test_add_get_transfers, {
     let chain = Chain::Bsc;
     let nft_ctx = get_nft_ctx(&chain).await;
@@ -527,7 +577,7 @@ cross_test!(test_get_update_transfer_meta, {
     storage.add_transfers_to_history(chain, transfers).await.unwrap();
 
     let vec_token_add_id = storage.get_transfers_with_empty_meta(chain).await.unwrap();
-    assert_eq!(vec_token_add_id.len(), 3);
+    assert_eq!(vec_token_add_id.len(), 2);
 
     let token_add = "0x5c7d6712dfaf0cb079d48981781c8705e8417ca0".to_string();
     let transfer_meta = TransferMeta {
@@ -693,3 +743,44 @@ cross_test!(test_exclude_transfer_phishing_spam, {
         .transfer_history;
     assert_eq!(transfers.len(), 1);
 });
+
+cross_test!(test_clear_history, {
+    let chain = Chain::Bsc;
+    let nft_ctx = get_nft_ctx(&chain).await;
+    let storage = nft_ctx.lock_db().await.unwrap();
+    NftTransferHistoryStorageOps::init(&storage, &chain).await.unwrap();
+    let transfers = nft_transfer_history();
+    storage.add_transfers_to_history(chain, transfers).await.unwrap();
+
+    storage.clear_history_data(&chain).await.unwrap();
+    test_clear_history_target(&storage, &chain).await;
+});
+
+cross_test!(test_clear_all_history, {
+    let chain = Chain::Bsc;
+    let nft_ctx = get_nft_ctx(&chain).await;
+    let storage = nft_ctx.lock_db().await.unwrap();
+    NftTransferHistoryStorageOps::init(&storage, &chain).await.unwrap();
+    let transfers = nft_transfer_history();
+    storage.add_transfers_to_history(chain, transfers).await.unwrap();
+
+    storage.clear_all_history_data().await.unwrap();
+    test_clear_history_target(&storage, &chain).await;
+});
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn test_clear_history_target<S: NftTransferHistoryStorageOps>(storage: &S, chain: &Chain) {
+    let is_init = NftTransferHistoryStorageOps::is_initialized(storage, chain)
+        .await
+        .unwrap();
+    assert!(!is_init);
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn test_clear_history_target<S: NftTransferHistoryStorageOps>(storage: &S, chain: &Chain) {
+    let transfer_list = storage
+        .get_transfer_history(vec![*chain], true, 1, None, None)
+        .await
+        .unwrap();
+    assert!(transfer_list.transfer_history.is_empty());
+}

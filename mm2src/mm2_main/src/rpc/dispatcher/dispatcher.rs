@@ -4,6 +4,8 @@ use crate::mm2::lp_native_dex::init_hw::{cancel_init_trezor, init_trezor, init_t
 use crate::mm2::lp_native_dex::init_metamask::{cancel_connect_metamask, connect_metamask, connect_metamask_status};
 use crate::mm2::lp_ordermatch::{best_orders_rpc_v2, orderbook_rpc_v2, start_simple_market_maker_bot,
                                 stop_simple_market_maker_bot};
+use crate::mm2::lp_swap::swap_v2_rpcs::{active_swaps_rpc, my_recent_swaps_rpc, my_swap_status_rpc};
+use crate::mm2::lp_wallet::get_mnemonic_rpc;
 use crate::mm2::rpc::rate_limiter::{process_rate_limit, RateLimitContext};
 use crate::{mm2::lp_stats::{add_node_to_version_stat, remove_node_from_version_stat, start_version_stat_collection,
                             stop_version_stat_collection, update_version_stat_collection},
@@ -11,11 +13,12 @@ use crate::{mm2::lp_stats::{add_node_to_version_stat, remove_node_from_version_s
             mm2::rpc::lp_commands::{get_public_key, get_public_key_hash, get_shared_db_id, trezor_connection_status}};
 use coins::eth::EthCoin;
 use coins::my_tx_history_v2::my_tx_history_v2_rpc;
-use coins::nft;
-use coins::rpc_command::tendermint::{ibc_chains, ibc_transfer_channels, ibc_withdraw};
+use coins::rpc_command::tendermint::{ibc_chains, ibc_transfer_channels};
 use coins::rpc_command::{account_balance::account_balance,
                          get_current_mtp::get_current_mtp_rpc,
                          get_enabled_coins::get_enabled_coins,
+                         get_estimated_fees::{get_eth_estimated_fee_per_gas, start_eth_fee_estimator,
+                                              stop_eth_fee_estimator},
                          get_new_address::{cancel_get_new_address, get_new_address, init_get_new_address,
                                            init_get_new_address_status, init_get_new_address_user_action},
                          init_account_balance::{cancel_account_balance, init_account_balance,
@@ -25,12 +28,15 @@ use coins::rpc_command::{account_balance::account_balance,
                          init_scan_for_new_addresses::{cancel_scan_for_new_addresses, init_scan_for_new_addresses,
                                                        init_scan_for_new_addresses_status},
                          init_withdraw::{cancel_withdraw, init_withdraw, withdraw_status, withdraw_user_action}};
+#[cfg(feature = "enable-sia")] use coins::sia::SiaCoin;
 use coins::tendermint::{TendermintCoin, TendermintToken};
 use coins::utxo::bch::BchCoin;
 use coins::utxo::qtum::QtumCoin;
 use coins::utxo::slp::SlpToken;
 use coins::utxo::utxo_standard::UtxoStandardCoin;
-use coins::{add_delegation, get_my_address, get_raw_transaction, get_staking_infos, remove_delegation, sign_message,
+use coins::z_coin::ZCoin;
+use coins::{add_delegation, get_my_address, get_raw_transaction, get_staking_infos, get_swap_transaction_fee_policy,
+            nft, remove_delegation, set_swap_transaction_fee_policy, sign_message, sign_raw_transaction,
             verify_message, withdraw};
 #[cfg(all(
     feature = "enable-solana",
@@ -39,24 +45,27 @@ use coins::{add_delegation, get_my_address, get_raw_transaction, get_staking_inf
     not(target_arch = "wasm32")
 ))]
 use coins::{SolanaCoin, SplToken};
-use coins_activation::{cancel_init_l2, cancel_init_standalone_coin, enable_platform_coin_with_tokens, enable_token,
-                       init_l2, init_l2_status, init_l2_user_action, init_standalone_coin,
-                       init_standalone_coin_status, init_standalone_coin_user_action};
+use coins_activation::{cancel_init_l2, cancel_init_platform_coin_with_tokens, cancel_init_standalone_coin,
+                       cancel_init_token, enable_platform_coin_with_tokens, enable_token, init_l2, init_l2_status,
+                       init_l2_user_action, init_platform_coin_with_tokens, init_platform_coin_with_tokens_status,
+                       init_platform_coin_with_tokens_user_action, init_standalone_coin, init_standalone_coin_status,
+                       init_standalone_coin_user_action, init_token, init_token_status, init_token_user_action};
 use common::log::{error, warn};
 use common::HttpStatusCode;
 use futures::Future as Future03;
 use http::Response;
+use mm2_core::data_asker::send_asked_data_rpc;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use mm2_rpc::mm_protocol::{MmRpcBuilder, MmRpcRequest, MmRpcVersion};
-use nft::{get_nft_list, get_nft_metadata, get_nft_transfers, refresh_nft_metadata, update_nft, withdraw_nft};
+use nft::{clear_nft_db, get_nft_list, get_nft_metadata, get_nft_transfers, refresh_nft_metadata, update_nft,
+          withdraw_nft};
 use serde::de::DeserializeOwned;
 use serde_json::{self as json, Value as Json};
 use std::net::SocketAddr;
 
 cfg_native! {
     use coins::lightning::LightningCoin;
-    use coins::z_coin::ZCoin;
 }
 
 pub async fn process_single_request(
@@ -153,13 +162,16 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
 
     match request.method.as_str() {
         "account_balance" => handle_mmrpc(ctx, request, account_balance).await,
+        "active_swaps" => handle_mmrpc(ctx, request, active_swaps_rpc).await,
         "add_delegation" => handle_mmrpc(ctx, request, add_delegation).await,
         "add_node_to_version_stat" => handle_mmrpc(ctx, request, add_node_to_version_stat).await,
         "best_orders" => handle_mmrpc(ctx, request, best_orders_rpc_v2).await,
+        "clear_nft_db" => handle_mmrpc(ctx, request, clear_nft_db).await,
         "enable_bch_with_tokens" => handle_mmrpc(ctx, request, enable_platform_coin_with_tokens::<BchCoin>).await,
         "enable_slp" => handle_mmrpc(ctx, request, enable_token::<SlpToken>).await,
         "enable_eth_with_tokens" => handle_mmrpc(ctx, request, enable_platform_coin_with_tokens::<EthCoin>).await,
         "enable_erc20" => handle_mmrpc(ctx, request, enable_token::<EthCoin>).await,
+        "enable_nft" => handle_mmrpc(ctx, request, enable_token::<EthCoin>).await,
         "enable_tendermint_with_assets" => {
             handle_mmrpc(ctx, request, enable_platform_coin_with_tokens::<TendermintCoin>).await
         },
@@ -167,6 +179,7 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
         "get_current_mtp" => handle_mmrpc(ctx, request, get_current_mtp_rpc).await,
         "get_enabled_coins" => handle_mmrpc(ctx, request, get_enabled_coins).await,
         "get_locked_amount" => handle_mmrpc(ctx, request, get_locked_amount_rpc).await,
+        "get_mnemonic" => handle_mmrpc(ctx, request, get_mnemonic_rpc).await,
         "get_my_address" => handle_mmrpc(ctx, request, get_my_address).await,
         "get_new_address" => handle_mmrpc(ctx, request, get_new_address).await,
         "get_nft_list" => handle_mmrpc(ctx, request, get_nft_list).await,
@@ -178,6 +191,8 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
         "get_shared_db_id" => handle_mmrpc(ctx, request, get_shared_db_id).await,
         "get_staking_infos" => handle_mmrpc(ctx, request, get_staking_infos).await,
         "max_maker_vol" => handle_mmrpc(ctx, request, max_maker_vol).await,
+        "my_recent_swaps" => handle_mmrpc(ctx, request, my_recent_swaps_rpc).await,
+        "my_swap_status" => handle_mmrpc(ctx, request, my_swap_status_rpc).await,
         "my_tx_history" => handle_mmrpc(ctx, request, my_tx_history_v2_rpc).await,
         "orderbook" => handle_mmrpc(ctx, request, orderbook_rpc_v2).await,
         "recreate_swap_data" => handle_mmrpc(ctx, request, recreate_swap_data).await,
@@ -185,6 +200,7 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
         "remove_delegation" => handle_mmrpc(ctx, request, remove_delegation).await,
         "remove_node_from_version_stat" => handle_mmrpc(ctx, request, remove_node_from_version_stat).await,
         "sign_message" => handle_mmrpc(ctx, request, sign_message).await,
+        "sign_raw_transaction" => handle_mmrpc(ctx, request, sign_raw_transaction).await,
         "start_simple_market_maker_bot" => handle_mmrpc(ctx, request, start_simple_market_maker_bot).await,
         "start_version_stat_collection" => handle_mmrpc(ctx, request, start_version_stat_collection).await,
         "stop_simple_market_maker_bot" => handle_mmrpc(ctx, request, stop_simple_market_maker_bot).await,
@@ -195,10 +211,16 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
         "update_version_stat_collection" => handle_mmrpc(ctx, request, update_version_stat_collection).await,
         "verify_message" => handle_mmrpc(ctx, request, verify_message).await,
         "withdraw" => handle_mmrpc(ctx, request, withdraw).await,
-        "ibc_withdraw" => handle_mmrpc(ctx, request, ibc_withdraw).await,
         "ibc_chains" => handle_mmrpc(ctx, request, ibc_chains).await,
         "ibc_transfer_channels" => handle_mmrpc(ctx, request, ibc_transfer_channels).await,
         "withdraw_nft" => handle_mmrpc(ctx, request, withdraw_nft).await,
+        "start_eth_fee_estimator" => handle_mmrpc(ctx, request, start_eth_fee_estimator).await,
+        "stop_eth_fee_estimator" => handle_mmrpc(ctx, request, stop_eth_fee_estimator).await,
+        "get_eth_estimated_fee_per_gas" => handle_mmrpc(ctx, request, get_eth_estimated_fee_per_gas).await,
+        "get_swap_transaction_fee_policy" => handle_mmrpc(ctx, request, get_swap_transaction_fee_policy).await,
+        "set_swap_transaction_fee_policy" => handle_mmrpc(ctx, request, set_swap_transaction_fee_policy).await,
+        "send_asked_data" => handle_mmrpc(ctx, request, send_asked_data_rpc).await,
+        "z_coin_tx_history" => handle_mmrpc(ctx, request, coins::my_tx_history_v2::z_coin_tx_history_rpc).await,
         #[cfg(not(target_arch = "wasm32"))]
         native_only_methods => match native_only_methods {
             #[cfg(all(feature = "enable-solana", not(target_os = "ios"), not(target_os = "android")))]
@@ -207,7 +229,6 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
             },
             #[cfg(all(feature = "enable-solana", not(target_os = "ios"), not(target_os = "android")))]
             "enable_spl" => handle_mmrpc(ctx, request, enable_token::<SplToken>).await,
-            "z_coin_tx_history" => handle_mmrpc(ctx, request, coins::my_tx_history_v2::z_coin_tx_history_rpc).await,
             _ => MmError::err(DispatcherError::NoSuchMethod),
         },
         #[cfg(target_arch = "wasm32")]
@@ -245,6 +266,16 @@ async fn rpc_task_dispatcher(
         "enable_utxo::user_action" => {
             handle_mmrpc(ctx, request, init_standalone_coin_user_action::<UtxoStandardCoin>).await
         },
+        "enable_eth::cancel" => handle_mmrpc(ctx, request, cancel_init_platform_coin_with_tokens::<EthCoin>).await,
+        "enable_eth::init" => handle_mmrpc(ctx, request, init_platform_coin_with_tokens::<EthCoin>).await,
+        "enable_eth::status" => handle_mmrpc(ctx, request, init_platform_coin_with_tokens_status::<EthCoin>).await,
+        "enable_eth::user_action" => {
+            handle_mmrpc(ctx, request, init_platform_coin_with_tokens_user_action::<EthCoin>).await
+        },
+        "enable_erc20::cancel" => handle_mmrpc(ctx, request, cancel_init_token::<EthCoin>).await,
+        "enable_erc20::init" => handle_mmrpc(ctx, request, init_token::<EthCoin>).await,
+        "enable_erc20::status" => handle_mmrpc(ctx, request, init_token_status::<EthCoin>).await,
+        "enable_erc20::user_action" => handle_mmrpc(ctx, request, init_token_user_action::<EthCoin>).await,
         "get_new_address::cancel" => handle_mmrpc(ctx, request, cancel_get_new_address).await,
         "get_new_address::init" => handle_mmrpc(ctx, request, init_get_new_address).await,
         "get_new_address::status" => handle_mmrpc(ctx, request, init_get_new_address_status).await,
@@ -260,16 +291,22 @@ async fn rpc_task_dispatcher(
         "withdraw::init" => handle_mmrpc(ctx, request, init_withdraw).await,
         "withdraw::status" => handle_mmrpc(ctx, request, withdraw_status).await,
         "withdraw::user_action" => handle_mmrpc(ctx, request, withdraw_user_action).await,
+        //"enable_sia::cancel" => handle_mmrpc(ctx, request, cancel_init_standalone_coin::<SiaCoin>).await,
+        #[cfg(feature = "enable-sia")]
+        "enable_sia::init" => handle_mmrpc(ctx, request, init_standalone_coin::<SiaCoin>).await,
+        #[cfg(feature = "enable-sia")]
+        "enable_sia::status" => handle_mmrpc(ctx, request, init_standalone_coin_status::<SiaCoin>).await,
+        //"enable_sia::user_action" => handle_mmrpc(ctx, request, init_standalone_coin_user_action::<SiaCoin>).await,
+        "enable_z_coin::init" => handle_mmrpc(ctx, request, init_standalone_coin::<ZCoin>).await,
+        "enable_z_coin::cancel" => handle_mmrpc(ctx, request, cancel_init_standalone_coin::<ZCoin>).await,
+        "enable_z_coin::status" => handle_mmrpc(ctx, request, init_standalone_coin_status::<ZCoin>).await,
+        "enable_z_coin::user_action" => handle_mmrpc(ctx, request, init_standalone_coin_user_action::<ZCoin>).await,
         #[cfg(not(target_arch = "wasm32"))]
         native_only_methods => match native_only_methods {
             "enable_lightning::cancel" => handle_mmrpc(ctx, request, cancel_init_l2::<LightningCoin>).await,
             "enable_lightning::init" => handle_mmrpc(ctx, request, init_l2::<LightningCoin>).await,
             "enable_lightning::status" => handle_mmrpc(ctx, request, init_l2_status::<LightningCoin>).await,
             "enable_lightning::user_action" => handle_mmrpc(ctx, request, init_l2_user_action::<LightningCoin>).await,
-            "enable_z_coin::cancel" => handle_mmrpc(ctx, request, cancel_init_standalone_coin::<ZCoin>).await,
-            "enable_z_coin::init" => handle_mmrpc(ctx, request, init_standalone_coin::<ZCoin>).await,
-            "enable_z_coin::status" => handle_mmrpc(ctx, request, init_standalone_coin_status::<ZCoin>).await,
-            "enable_z_coin::user_action" => handle_mmrpc(ctx, request, init_standalone_coin_user_action::<ZCoin>).await,
             _ => MmError::err(DispatcherError::NoSuchMethod),
         },
         #[cfg(target_arch = "wasm32")]

@@ -399,6 +399,7 @@ impl Platform {
                         output.script_pubkey.as_ref(),
                         output.outpoint.index.into(),
                         BlockHashOrHeight::Hash(Default::default()),
+                        self.coin.as_ref().tx_hash_algo,
                     )
                     .compat()
                     .await
@@ -545,7 +546,7 @@ impl Platform {
             .await
             .map_to_mm(|e| SaveChannelClosingError::WaitForFundingTxSpendError(e.get_plain_text_format()))?;
 
-        let closing_tx_hash = format!("{:02x}", closing_tx.tx_hash());
+        let closing_tx_hash = format!("{:02x}", closing_tx.tx_hash_as_bytes());
 
         Ok(closing_tx_hash)
     }

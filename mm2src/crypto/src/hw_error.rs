@@ -77,6 +77,7 @@ impl From<TrezorError> for HwError {
             TrezorError::UnexpectedInteractionRequest(req) => HwError::UnexpectedUserInteractionRequest(req),
             TrezorError::Internal(_) => HwError::Internal(error),
             TrezorError::PongMessageMismatch => HwError::PongMessageMismatch,
+            TrezorError::InternalNoProcessor => HwError::Internal("no processor object set".to_string()),
         }
     }
 }
@@ -90,7 +91,7 @@ impl From<Bip32Error> for HwError {
 /// so please extend it if it's required **only**.
 ///
 /// Please also note that this enum is fieldless.
-#[derive(Clone, Debug, Display, Serialize, PartialEq)]
+#[derive(Clone, Debug, Display, Serialize, PartialEq, Deserialize)]
 pub enum HwRpcError {
     #[display(fmt = "No Trezor device available")]
     NoTrezorDeviceAvailable = 0,

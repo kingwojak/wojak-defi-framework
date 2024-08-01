@@ -32,6 +32,16 @@ impl Private {
         Ok(data.as_ref().to_vec().into())
     }
 
+    /// Sign a message with a low R value, this reduces signature malleability for Bitcoin transactions
+    /// and makes fee estimation more reliable.
+    pub fn sign_low_r(&self, message: &Message) -> Result<Signature, Error> {
+        let secret = SecretKey::from_slice(&*self.secret)?;
+        let message = SecpMessage::from_slice(&**message)?;
+        let signature = SECP_SIGN.sign_low_r(&message, &secret);
+        let data = signature.serialize_der();
+        Ok(data.as_ref().to_vec().into())
+    }
+
     // https://github.com/qtumproject/qtum/blob/master/src/key.cpp#L302
     pub fn sign_compact(&self, message: &Message) -> Result<Signature, Error> {
         let secret = SecretKey::from_slice(&*self.secret)?;

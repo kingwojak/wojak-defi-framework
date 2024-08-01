@@ -1,5 +1,5 @@
 /******************************************************************************
- * Copyright © 2023 Pampex LTD and TillyHK LTD              *
+ * Copyright © 2023 Pampex LTD and TillyHK LTD                                *
  *                                                                            *
  * See the CONTRIBUTOR-LICENSE-AGREEMENT, COPYING, LICENSE-COPYRIGHT-NOTICE   *
  * and DEVELOPER-CERTIFICATE-OF-ORIGIN files in the LEGAL directory in        *
@@ -19,6 +19,7 @@
 //  marketmaker
 //
 
+use crate::global_hd_ctx::Bip39Seed;
 use bitcrypto::{sha256, ChecksumType};
 use derive_more::Display;
 use keys::{Error as KeysError, KeyPair, Private, Secret as Secp256k1Secret};
@@ -47,6 +48,8 @@ impl From<FromHexError> for PrivKeyError {
 impl From<KeysError> for PrivKeyError {
     fn from(e: KeysError) -> Self { PrivKeyError::InvalidPrivKey(e.to_string()) }
 }
+
+impl std::error::Error for PrivKeyError {}
 
 fn private_from_seed(seed: &str) -> PrivKeyResult<Private> {
     match seed.parse() {
@@ -115,10 +118,11 @@ pub fn key_pair_from_secret(secret: &[u8]) -> PrivKeyResult<KeyPair> {
     Ok(KeyPair::from_private(private)?)
 }
 
-pub fn bip39_seed_from_passphrase(passphrase: &str) -> PrivKeyResult<bip39::Seed> {
-    let mnemonic = bip39::Mnemonic::from_phrase(passphrase, bip39::Language::English)
+pub fn bip39_seed_from_passphrase(passphrase: &str) -> PrivKeyResult<Bip39Seed> {
+    let mnemonic = bip39::Mnemonic::parse_in_normalized(bip39::Language::English, passphrase)
         .map_to_mm(|e| PrivKeyError::ErrorParsingPassphrase(e.to_string()))?;
-    Ok(bip39::Seed::new(&mnemonic, ""))
+    let seed = mnemonic.to_seed_normalized("");
+    Ok(Bip39Seed(seed))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -133,7 +137,7 @@ impl PartialEq for SerializableSecp256k1Keypair {
 impl Eq for SerializableSecp256k1Keypair {}
 
 impl SerializableSecp256k1Keypair {
-    fn new(key: [u8; 32]) -> PrivKeyResult<Self> {
+    pub fn new(key: [u8; 32]) -> PrivKeyResult<Self> {
         Ok(SerializableSecp256k1Keypair {
             inner: key_pair_from_secret(&key)?,
         })
@@ -143,7 +147,7 @@ impl SerializableSecp256k1Keypair {
 
     pub fn public_slice(&self) -> &[u8] { self.inner.public_slice() }
 
-    fn priv_key(&self) -> [u8; 32] { self.inner.private().secret.take() }
+    pub fn priv_key(&self) -> [u8; 32] { self.inner.private().secret.take() }
 
     pub fn random() -> Self {
         SerializableSecp256k1Keypair {

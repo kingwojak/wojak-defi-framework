@@ -12,10 +12,12 @@ extern crate serde;
 #[macro_use] extern crate serde_derive;
 
 mod address;
+mod address_prefixes;
 mod cashaddress;
 mod display;
 mod error;
 mod keypair;
+mod legacyaddress;
 mod network;
 mod private;
 mod public;
@@ -24,11 +26,14 @@ mod signature;
 
 pub use primitives::{bytes, hash};
 
-pub use address::{Address, AddressFormat, Type};
-pub use cashaddress::{AddressType as CashAddrType, CashAddress, NetworkPrefix};
+pub use address::{Address, AddressBuilder, AddressBuilderOption, AddressFormat, AddressScriptType};
+pub use address_prefixes::prefixes;
+pub use address_prefixes::{AddressPrefix, NetworkAddressPrefixes};
+pub use cashaddress::{CashAddrType, CashAddress, NetworkPrefix};
 pub use display::DisplayLayout;
 pub use error::Error;
 pub use keypair::KeyPair;
+pub use legacyaddress::LegacyAddress;
 pub use network::Network;
 pub use private::Private;
 pub use public::Public;
@@ -47,7 +52,7 @@ pub type Message = H256;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum AddressHashEnum {
-    /// 20 bytes long hash derived from public `ripemd160(sha256(public))` used in P2PKH, P2SH, P2WPKH
+    /// 20 bytes long hash derived from public `ripemd160(sha256(public/script))` used in P2PKH, P2SH, P2WPKH
     AddressHash(H160),
     /// 32 bytes long hash derived from script `sha256(script)` used in P2WSH
     WitnessScriptHash(H256),

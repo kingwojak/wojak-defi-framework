@@ -1,7 +1,7 @@
 // TODO: a lof of these implementations should be handled in `mm2_net`
 
 /******************************************************************************
- * Copyright © 2023 Pampex LTD and TillyHK LTD              *
+ * Copyright © 2023 Pampex LTD and TillyHK LTD                                *
  *                                                                            *
  * See the CONTRIBUTOR-LICENSE-AGREEMENT, COPYING, LICENSE-COPYRIGHT-NOTICE   *
  * and DEVELOPER-CERTIFICATE-OF-ORIGIN files in the LEGAL directory in        *
@@ -72,6 +72,12 @@ pub enum P2PProcessError {
     DecodeError(String),
     /// Message signature is invalid.
     InvalidSignature(String),
+    /// Unexpected message sender.
+    #[display(fmt = "Unexpected message sender {}", _0)]
+    UnexpectedSender(String),
+    /// Message did not pass additional validation
+    #[display(fmt = "Message validation failed: {}", _0)]
+    ValidationFailed(String),
 }
 
 impl From<rmp_serde::encode::Error> for P2PRequestError {
@@ -268,6 +274,15 @@ pub fn subscribe_to_topic(ctx: &MmArc, topic: String) {
     let cmd = AdexBehaviourCmd::Subscribe { topic };
     if let Err(e) = p2p_ctx.cmd_tx.lock().try_send(cmd) {
         log::error!("subscribe_to_topic cmd_tx.send error {:?}", e);
+    };
+}
+
+/// Unsubscribe from the given `topic`.
+pub fn unsubscribe_from_topic(ctx: &MmArc, topic: String) {
+    let p2p_ctx = P2PContext::fetch_from_mm_arc(ctx);
+    let cmd = AdexBehaviourCmd::Unsubscribe { topic };
+    if let Err(e) = p2p_ctx.cmd_tx.lock().try_send(cmd) {
+        log::error!("unsubscribe_from_topic cmd_tx.send error {:?}", e);
     };
 }
 

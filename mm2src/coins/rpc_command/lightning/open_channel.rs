@@ -146,8 +146,8 @@ pub async fn open_channel(ctx: MmArc, req: OpenChannelRequest) -> OpenChannelRes
 
     let platform_coin = ln_coin.platform_coin().clone();
     let decimals = platform_coin.as_ref().decimals;
-    let my_address = platform_coin.as_ref().derivation_method.single_addr_or_err()?;
-    let (unspents, _) = platform_coin.get_unspent_ordered_list(my_address).await?;
+    let my_address = platform_coin.as_ref().derivation_method.single_addr_or_err().await?;
+    let (unspents, _) = platform_coin.get_unspent_ordered_list(&my_address).await?;
     let (value, fee_policy) = match req.amount.clone() {
         ChannelOpenAmount::Max => (
             unspents.iter().fold(0, |sum, unspent| sum + unspent.value),
@@ -161,11 +161,14 @@ pub async fn open_channel(ctx: MmArc, req: OpenChannelRequest) -> OpenChannelRes
 
     // The actual script_pubkey will replace this before signing the transaction after receiving the required
     // output script from the other node when the channel is accepted
-    let script_pubkey =
-        Builder::build_witness_script(&AddressHashEnum::WitnessScriptHash(Default::default())).to_bytes();
+    let script_pubkey = match Builder::build_p2wsh(&AddressHashEnum::WitnessScriptHash(Default::default())) {
+        Ok(script) => script.to_bytes(),
+        Err(err) => return MmError::err(OpenChannelError::InternalError(err.to_string())),
+    };
     let outputs = vec![TransactionOutput { value, script_pubkey }];
 
     let mut tx_builder = UtxoTxBuilder::new(&platform_coin)
+        .await
         .add_available_inputs(unspents)
         .add_outputs(outputs)
         .with_fee_policy(fee_policy);

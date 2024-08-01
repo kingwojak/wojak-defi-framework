@@ -1,4 +1,4 @@
-use crate::coin_balance::HDAccountBalance;
+use crate::coin_balance::{BalanceObjectOps, HDAccountBalance, HDAccountBalanceEnum};
 use crate::rpc_command::hd_account_balance_rpc_error::HDAccountBalanceRpcError;
 use crate::{lp_coinfind_or_err, CoinsContext, MmCoinEnum};
 use async_trait::async_trait;
@@ -7,15 +7,15 @@ use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use rpc_task::rpc_common::{CancelRpcTaskError, CancelRpcTaskRequest, InitRpcTaskResponse, RpcTaskStatusError,
                            RpcTaskStatusRequest};
-use rpc_task::{RpcTask, RpcTaskHandle, RpcTaskManager, RpcTaskManagerShared, RpcTaskStatus, RpcTaskTypes};
+use rpc_task::{RpcTask, RpcTaskHandleShared, RpcTaskManager, RpcTaskManagerShared, RpcTaskStatus, RpcTaskTypes};
 
 pub type AccountBalanceUserAction = SerdeInfallible;
 pub type AccountBalanceAwaitingStatus = SerdeInfallible;
 pub type AccountBalanceTaskManager = RpcTaskManager<InitAccountBalanceTask>;
 pub type AccountBalanceTaskManagerShared = RpcTaskManagerShared<InitAccountBalanceTask>;
-pub type InitAccountBalanceTaskHandle = RpcTaskHandle<InitAccountBalanceTask>;
+pub type InitAccountBalanceTaskHandleShared = RpcTaskHandleShared<InitAccountBalanceTask>;
 pub type AccountBalanceRpcTaskStatus = RpcTaskStatus<
-    HDAccountBalance,
+    HDAccountBalanceEnum,
     HDAccountBalanceRpcError,
     AccountBalanceInProgressStatus,
     AccountBalanceAwaitingStatus,
@@ -40,10 +40,12 @@ pub struct InitAccountBalanceParams {
 
 #[async_trait]
 pub trait InitAccountBalanceRpcOps {
+    type BalanceObject;
+
     async fn init_account_balance_rpc(
         &self,
         params: InitAccountBalanceParams,
-    ) -> MmResult<HDAccountBalance, HDAccountBalanceRpcError>;
+    ) -> MmResult<HDAccountBalance<Self::BalanceObject>, HDAccountBalanceRpcError>;
 }
 
 pub struct InitAccountBalanceTask {
@@ -52,7 +54,7 @@ pub struct InitAccountBalanceTask {
 }
 
 impl RpcTaskTypes for InitAccountBalanceTask {
-    type Item = HDAccountBalance;
+    type Item = HDAccountBalanceEnum;
     type Error = HDAccountBalanceRpcError;
     type InProgressStatus = AccountBalanceInProgressStatus;
     type AwaitingStatus = AccountBalanceAwaitingStatus;
@@ -66,10 +68,20 @@ impl RpcTask for InitAccountBalanceTask {
     // Do nothing if the task has been cancelled.
     async fn cancel(self) {}
 
-    async fn run(&mut self, _task_handle: &InitAccountBalanceTaskHandle) -> Result<Self::Item, MmError<Self::Error>> {
+    async fn run(
+        &mut self,
+        _task_handle: InitAccountBalanceTaskHandleShared,
+    ) -> Result<Self::Item, MmError<Self::Error>> {
         match self.coin {
-            MmCoinEnum::UtxoCoin(ref utxo) => utxo.init_account_balance_rpc(self.req.params.clone()).await,
-            MmCoinEnum::QtumCoin(ref qtum) => qtum.init_account_balance_rpc(self.req.params.clone()).await,
+            MmCoinEnum::UtxoCoin(ref utxo) => Ok(HDAccountBalanceEnum::Single(
+                utxo.init_account_balance_rpc(self.req.params.clone()).await?,
+            )),
+            MmCoinEnum::QtumCoin(ref qtum) => Ok(HDAccountBalanceEnum::Single(
+                qtum.init_account_balance_rpc(self.req.params.clone()).await?,
+            )),
+            MmCoinEnum::EthCoin(ref eth) => Ok(HDAccountBalanceEnum::Map(
+                eth.init_account_balance_rpc(self.req.params.clone()).await?,
+            )),
             _ => MmError::err(HDAccountBalanceRpcError::CoinIsActivatedNotWithHDWallet),
         }
     }
@@ -116,19 +128,19 @@ pub async fn cancel_account_balance(
 
 pub mod common_impl {
     use super::*;
-    use crate::coin_balance::HDWalletBalanceOps;
-    use crate::hd_wallet::{HDAccountOps, HDWalletCoinOps, HDWalletOps};
-    use crate::{CoinBalance, CoinWithDerivationMethod};
+    use crate::coin_balance::{HDWalletBalanceObject, HDWalletBalanceOps};
+    use crate::hd_wallet::{HDAccountOps, HDCoinAddress, HDWalletOps};
+    use crate::CoinWithDerivationMethod;
     use crypto::RpcDerivationPath;
     use std::fmt;
 
     pub async fn init_account_balance_rpc<Coin>(
         coin: &Coin,
         params: InitAccountBalanceParams,
-    ) -> MmResult<HDAccountBalance, HDAccountBalanceRpcError>
+    ) -> MmResult<HDAccountBalance<HDWalletBalanceObject<Coin>>, HDAccountBalanceRpcError>
     where
-        Coin: HDWalletBalanceOps + CoinWithDerivationMethod<HDWallet = <Coin as HDWalletCoinOps>::HDWallet> + Sync,
-        <Coin as HDWalletCoinOps>::Address: fmt::Display + Clone,
+        Coin: HDWalletBalanceOps + CoinWithDerivationMethod + Sync,
+        HDCoinAddress<Coin>: fmt::Display + Clone,
     {
         let account_id = params.account_index;
         let hd_account = coin
@@ -139,10 +151,12 @@ pub mod common_impl {
             .or_mm_err(|| HDAccountBalanceRpcError::UnknownAccount { account_id })?;
 
         let addresses = coin.all_known_addresses_balances(&hd_account).await?;
+
         let total_balance = addresses
             .iter()
-            .fold(CoinBalance::default(), |total_balance, address_balance| {
-                total_balance + address_balance.balance.clone()
+            .fold(HDWalletBalanceObject::<Coin>::new(), |mut total, addr_balance| {
+                total.add(addr_balance.balance.clone());
+                total
             });
 
         Ok(HDAccountBalance {

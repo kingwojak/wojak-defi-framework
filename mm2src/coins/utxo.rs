@@ -1,5 +1,5 @@
 /******************************************************************************
- * Copyright © 2023 Pampex LTD and TillyHK LTD              *
+ * Copyright © 2023 Pampex LTD and TillyHK LTD                                *
  *                                                                            *
  * See the CONTRIBUTOR-LICENSE-AGREEMENT, COPYING, LICENSE-COPYRIGHT-NOTICE   *
  * and DEVELOPER-CERTIFICATE-OF-ORIGIN files in the LEGAL directory in        *
@@ -32,9 +32,11 @@ pub mod rpc_clients;
 pub mod slp;
 pub mod spv;
 pub mod swap_proto_v2_scripts;
+pub mod utxo_balance_events;
 pub mod utxo_block_header_storage;
 pub mod utxo_builder;
 pub mod utxo_common;
+pub mod utxo_hd_wallet;
 pub mod utxo_standard;
 pub mod utxo_tx_history_v2;
 pub mod utxo_withdraw;
@@ -51,21 +53,21 @@ use common::first_char_to_upper;
 use common::jsonrpc_client::JsonRpcError;
 use common::log::LogOnError;
 use common::{now_sec, now_sec_u32};
-use crypto::{Bip32DerPathOps, Bip32Error, Bip44Chain, ChildNumber, DerivationPath, Secp256k1ExtendedPublicKey,
-             StandardHDCoinAddress, StandardHDPathError, StandardHDPathToAccount, StandardHDPathToCoin};
+use crypto::{DerivationPath, HDPathToCoin, Secp256k1ExtendedPublicKey};
 use derive_more::Display;
 #[cfg(not(target_arch = "wasm32"))] use dirs::home_dir;
-use futures::channel::mpsc::{Receiver as AsyncReceiver, Sender as AsyncSender, UnboundedSender};
+use futures::channel::mpsc::{Receiver as AsyncReceiver, Sender as AsyncSender, UnboundedReceiver, UnboundedSender};
 use futures::compat::Future01CompatExt;
 use futures::lock::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 use futures01::Future;
 use keys::bytes::Bytes;
+use keys::NetworkAddressPrefixes;
 use keys::Signature;
-pub use keys::{Address, AddressFormat as UtxoAddressFormat, AddressHashEnum, KeyPair, Private, Public, Secret,
-               Type as ScriptType};
+pub use keys::{Address, AddressBuilder, AddressFormat as UtxoAddressFormat, AddressHashEnum, AddressPrefix,
+               AddressScriptType, KeyPair, LegacyAddress, Private, Public, Secret};
 #[cfg(not(target_arch = "wasm32"))]
 use lightning_invoice::Currency as LightningCurrency;
-use mm2_core::mm_ctx::MmArc;
+use mm2_core::mm_ctx::{MmArc, MmWeak};
 use mm2_err_handle::prelude::*;
 use mm2_metrics::MetricsArc;
 use mm2_number::BigDecimal;
@@ -89,11 +91,11 @@ use std::num::{NonZeroU64, TryFromIntError};
 use std::ops::Deref;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, Weak};
 use utxo_builder::UtxoConfBuilder;
 use utxo_common::{big_decimal_from_sat, UtxoTxBuilder};
+use utxo_hd_wallet::UtxoHDWallet;
 use utxo_signer::with_key_pair::sign_tx;
 use utxo_signer::{TxProvider, TxProviderError, UtxoSignTxError, UtxoSignTxResult};
 
@@ -103,16 +105,14 @@ use self::rpc_clients::{electrum_script_hash, ElectrumClient, ElectrumRpcRequest
 use super::{big_decimal_from_sat_unsigned, BalanceError, BalanceFut, BalanceResult, CoinBalance, CoinFutSpawner,
             CoinsContext, DerivationMethod, FeeApproxStage, FoundSwapTxSpend, HistorySyncState, KmdRewardsDetails,
             MarketCoinOps, MmCoin, NumConversError, NumConversResult, PrivKeyActivationPolicy, PrivKeyPolicy,
-            PrivKeyPolicyNotAllowed, RawTransactionFut, RawTransactionRequest, RawTransactionResult,
-            RpcTransportEventHandler, RpcTransportEventHandlerShared, TradeFee, TradePreimageError, TradePreimageFut,
-            TradePreimageResult, Transaction, TransactionDetails, TransactionEnum, TransactionErr,
-            UnexpectedDerivationMethod, VerificationError, WithdrawError, WithdrawRequest};
+            PrivKeyPolicyNotAllowed, RawTransactionFut, RpcTransportEventHandler, RpcTransportEventHandlerShared,
+            TradeFee, TradePreimageError, TradePreimageFut, TradePreimageResult, Transaction, TransactionDetails,
+            TransactionEnum, TransactionErr, UnexpectedDerivationMethod, VerificationError, WithdrawError,
+            WithdrawRequest};
 use crate::coin_balance::{EnableCoinScanPolicy, EnabledCoinBalanceParams, HDAddressBalanceScanner};
-use crate::hd_wallet::{HDAccountOps, HDAccountsMutex, HDAddress, HDAddressId, HDWalletCoinOps, HDWalletOps,
-                       InvalidBip44ChainError};
-use crate::hd_wallet_storage::{HDAccountStorageItem, HDWalletCoinStorage, HDWalletStorageError, HDWalletStorageResult};
+use crate::hd_wallet::{HDAccountOps, HDAddressOps, HDPathAccountToAddressId, HDWalletCoinOps, HDWalletOps};
 use crate::utxo::tx_cache::UtxoVerboseCacheShared;
-use crate::{CoinAssocTypes, ToBytes};
+use crate::{ParseCoinAssocTypes, ToBytes};
 
 pub mod tx_cache;
 
@@ -134,13 +134,20 @@ const UTXO_DUST_AMOUNT: u64 = 1000;
 /// 11 > 0
 const KMD_MTP_BLOCK_COUNT: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(11u64) };
 const DEFAULT_DYNAMIC_FEE_VOLATILITY_PERCENT: f64 = 0.5;
-const DEFAULT_GAP_LIMIT: u32 = 20;
 
 pub type GenerateTxResult = Result<(TransactionInputSigner, AdditionalTxData), MmError<GenerateTxError>>;
 pub type HistoryUtxoTxMap = HashMap<H256Json, HistoryUtxoTx>;
 pub type MatureUnspentMap = HashMap<Address, MatureUnspentList>;
 pub type RecentlySpentOutPointsGuard<'a> = AsyncMutexGuard<'a, RecentlySpentOutPoints>;
-pub type UtxoHDAddress = HDAddress<Address, Public>;
+
+pub enum ScripthashNotification {
+    Triggered(String),
+    SubscribeToAddresses(HashSet<Address>),
+    RefreshSubscriptions,
+}
+
+pub type ScripthashNotificationSender = Option<UnboundedSender<ScripthashNotification>>;
+type ScripthashNotificationHandler = Option<Arc<AsyncMutex<UnboundedReceiver<ScripthashNotification>>>>;
 
 #[cfg(windows)]
 #[cfg(not(target_arch = "wasm32"))]
@@ -175,7 +182,7 @@ impl Transaction for UtxoTx {
         }
     }
 
-    fn tx_hash(&self) -> BytesJson { self.hash().reversed().to_vec().into() }
+    fn tx_hash_as_bytes(&self) -> BytesJson { self.hash().reversed().to_vec().into() }
 }
 
 impl From<JsonRpcError> for BalanceError {
@@ -189,6 +196,10 @@ impl From<UtxoRpcError> for BalanceError {
             _ => BalanceError::Transport(e.to_string()),
         }
     }
+}
+
+impl From<keys::Error> for BalanceError {
+    fn from(e: keys::Error) -> Self { BalanceError::Internal(e.to_string()) }
 }
 
 impl From<UtxoRpcError> for WithdrawError {
@@ -229,14 +240,6 @@ impl From<UtxoRpcError> for TxProviderError {
             UtxoRpcError::Internal(internal) => TxProviderError::Internal(internal),
         }
     }
-}
-
-impl From<StandardHDPathError> for HDWalletStorageError {
-    fn from(e: StandardHDPathError) -> Self { HDWalletStorageError::ErrorDeserializing(e.to_string()) }
-}
-
-impl From<Bip32Error> for HDWalletStorageError {
-    fn from(e: Bip32Error) -> Self { HDWalletStorageError::ErrorDeserializing(e.to_string()) }
 }
 
 #[async_trait]
@@ -297,21 +300,20 @@ pub struct CachedUnspentInfo {
     pub value: u64,
 }
 
-impl From<UnspentInfo> for CachedUnspentInfo {
-    fn from(unspent: UnspentInfo) -> CachedUnspentInfo {
+impl CachedUnspentInfo {
+    fn from_unspent_info(unspent: &UnspentInfo) -> CachedUnspentInfo {
         CachedUnspentInfo {
             outpoint: unspent.outpoint,
             value: unspent.value,
         }
     }
-}
 
-impl From<CachedUnspentInfo> for UnspentInfo {
-    fn from(cached: CachedUnspentInfo) -> UnspentInfo {
+    fn to_unspent_info(&self, script: Script) -> UnspentInfo {
         UnspentInfo {
-            outpoint: cached.outpoint,
-            value: cached.value,
+            outpoint: self.outpoint,
+            value: self.value,
             height: None,
+            script,
         }
     }
 }
@@ -338,22 +340,17 @@ impl RecentlySpentOutPoints {
     }
 
     pub fn add_spent(&mut self, inputs: Vec<UnspentInfo>, spend_tx_hash: H256, outputs: Vec<TransactionOutput>) {
-        let inputs: HashSet<_> = inputs.into_iter().map(From::from).collect();
+        let inputs: HashSet<_> = inputs.iter().map(CachedUnspentInfo::from_unspent_info).collect();
         let to_replace: HashSet<_> = outputs
-            .iter()
+            .into_iter()
             .enumerate()
-            .filter_map(|(index, output)| {
-                if output.script_pubkey == self.for_script_pubkey {
-                    Some(CachedUnspentInfo {
-                        outpoint: OutPoint {
-                            hash: spend_tx_hash,
-                            index: index as u32,
-                        },
-                        value: output.value,
-                    })
-                } else {
-                    None
-                }
+            .filter(|(_, output)| output.script_pubkey == self.for_script_pubkey)
+            .map(|(index, output)| CachedUnspentInfo {
+                outpoint: OutPoint {
+                    hash: spend_tx_hash,
+                    index: index as u32,
+                },
+                value: output.value,
             })
             .collect();
 
@@ -388,13 +385,14 @@ impl RecentlySpentOutPoints {
     pub fn replace_spent_outputs_with_cache(&self, mut outputs: HashSet<UnspentInfo>) -> HashSet<UnspentInfo> {
         let mut replacement_unspents = HashSet::new();
         outputs.retain(|unspent| {
-            let outs = self.input_to_output_map.get(&unspent.clone().into());
+            let outs = self
+                .input_to_output_map
+                .get(&CachedUnspentInfo::from_unspent_info(unspent));
+
             match outs {
                 Some(outs) => {
-                    for out in outs.iter() {
-                        if !replacement_unspents.contains(out) {
-                            replacement_unspents.insert(out.clone());
-                        }
+                    for out in outs {
+                        replacement_unspents.insert(out.clone());
                     }
                     false
                 },
@@ -404,7 +402,11 @@ impl RecentlySpentOutPoints {
         if replacement_unspents.is_empty() {
             return outputs;
         }
-        outputs.extend(replacement_unspents.into_iter().map(From::from));
+        outputs.extend(
+            replacement_unspents
+                .iter()
+                .map(|cached| cached.to_unspent_info(self.for_script_pubkey.clone().into())),
+        );
         self.replace_spent_outputs_with_cache(outputs)
     }
 }
@@ -494,11 +496,8 @@ pub struct UtxoCoinConf {
     pub ticker: String,
     /// https://en.bitcoin.it/wiki/List_of_address_prefixes
     /// https://github.com/jl777/coins/blob/master/coins
-    pub pub_addr_prefix: u8,
-    pub p2sh_addr_prefix: u8,
     pub wif_prefix: u8,
-    pub pub_t_addr_prefix: u8,
-    pub p2sh_t_addr_prefix: u8,
+    pub address_prefixes: NetworkAddressPrefixes,
     pub sign_message_prefix: Option<String>,
     // https://github.com/bitcoin/bips/blob/master/bip-0173.mediawiki#Segwit_address_format
     pub bech32_hrp: Option<String>,
@@ -567,7 +566,7 @@ pub struct UtxoCoinConf {
     /// This derivation path consists of `purpose` and `coin_type` only
     /// where the full `BIP44` address has the following structure:
     /// `m/purpose'/coin_type'/account'/change/address_index`.
-    pub derivation_path: Option<StandardHDPathToCoin>,
+    pub derivation_path: Option<HDPathToCoin>,
     /// The average time in seconds needed to mine a new block for this coin.
     pub avg_blocktime: Option<u64>,
 }
@@ -588,7 +587,7 @@ pub struct UtxoCoinFields {
     pub rpc_client: UtxoRpcClientEnum,
     /// Either ECDSA key pair or a Hardware Wallet info.
     pub priv_key_policy: PrivKeyPolicy<KeyPair>,
-    /// Either an Iguana address or an info about last derived account/address.
+    /// Either an Iguana address or a 'UtxoHDWallet' instance.
     pub derivation_method: DerivationMethod<Address, UtxoHDWallet>,
     pub history_sync_state: Mutex<HistorySyncState>,
     /// The cache of verbose transactions.
@@ -610,6 +609,11 @@ pub struct UtxoCoinFields {
     /// This abortable system is used to spawn coin's related futures that should be aborted on coin deactivation
     /// and on [`MmArc::stop`].
     pub abortable_system: AbortableQueue,
+    pub(crate) ctx: MmWeak,
+    /// This is used for balance event streaming implementation for UTXOs.
+    /// If balance event streaming isn't enabled, this value will always be `None`; otherwise,
+    /// it will be used for receiving scripthash notifications to re-fetch balances.
+    scripthash_notification_handler: ScripthashNotificationHandler,
 }
 
 #[derive(Debug, Display)]
@@ -631,10 +635,16 @@ pub enum UnsupportedAddr {
     HrpError { ticker: String, hrp: String },
     #[display(fmt = "Segwit not activated in the config for {}", _0)]
     SegwitNotActivated(String),
+    #[display(fmt = "Internal error {}", _0)]
+    InternalError(String),
 }
 
 impl From<UnsupportedAddr> for WithdrawError {
     fn from(e: UnsupportedAddr) -> Self { WithdrawError::InvalidAddress(e.to_string()) }
+}
+
+impl From<keys::Error> for UnsupportedAddr {
+    fn from(e: keys::Error) -> Self { UnsupportedAddr::InternalError(e.to_string()) }
 }
 
 #[derive(Debug)]
@@ -864,7 +874,7 @@ impl HDAddressBalanceScanner for UtxoAddressScanner {
         let is_used = match self {
             UtxoAddressScanner::Native { non_empty_addresses } => non_empty_addresses.contains(&address.to_string()),
             UtxoAddressScanner::Electrum(electrum_client) => {
-                let script = output_script(address, ScriptType::P2PKH);
+                let script = output_script(address)?;
                 let script_hash = electrum_script_hash(&script);
 
                 let electrum_history = electrum_client
@@ -962,6 +972,9 @@ pub trait UtxoCommonOps:
     /// and if it failed inform user that he used a wrong format.
     fn address_from_str(&self, address: &str) -> MmResult<Address, AddrFromStrError>;
 
+    /// For an address create corresponding utxo output script
+    fn script_for_address(&self, address: &Address) -> MmResult<Script, UnsupportedAddr>;
+
     async fn get_current_mtp(&self) -> UtxoRpcResult<u32>;
 
     /// Check if the output is spendable (is not coinbase or it has enough confirmations).
@@ -1007,11 +1020,6 @@ pub trait UtxoCommonOps:
     fn addr_format_for_standard_scripts(&self) -> UtxoAddressFormat;
 
     fn address_from_pubkey(&self, pubkey: &Public) -> Address;
-
-    fn address_from_extended_pubkey(&self, extended_pubkey: &Secp256k1ExtendedPublicKey) -> Address {
-        let pubkey = Public::Compressed(H264::from(extended_pubkey.public_key().serialize()));
-        self.address_from_pubkey(&pubkey)
-    }
 }
 
 impl ToBytes for UtxoTx {
@@ -1022,7 +1030,10 @@ impl ToBytes for Signature {
     fn to_bytes(&self) -> Vec<u8> { self.to_vec() }
 }
 
-impl<T: UtxoCommonOps> CoinAssocTypes for T {
+#[async_trait]
+impl<T: UtxoCommonOps> ParseCoinAssocTypes for T {
+    type Address = Address;
+    type AddressParseError = MmError<AddrFromStrError>;
     type Pubkey = Public;
     type PubkeyParseError = MmError<keys::Error>;
     type Tx = UtxoTx;
@@ -1032,9 +1043,25 @@ impl<T: UtxoCommonOps> CoinAssocTypes for T {
     type Sig = Signature;
     type SigParseError = MmError<secp256k1::Error>;
 
+    async fn my_addr(&self) -> Self::Address {
+        match &self.as_ref().derivation_method {
+            DerivationMethod::SingleAddress(addr) => addr.clone(),
+            // Todo: Expect should not fail but we need to handle it properly
+            DerivationMethod::HDWallet(hd_wallet) => hd_wallet
+                .get_enabled_address()
+                .await
+                .expect("Getting enabled address should not fail!")
+                .address(),
+        }
+    }
+
+    fn parse_address(&self, address: &str) -> Result<Self::Address, Self::AddressParseError> {
+        self.address_from_str(address)
+    }
+
     #[inline]
     fn parse_pubkey(&self, pubkey: &[u8]) -> Result<Self::Pubkey, Self::PubkeyParseError> {
-        Ok(Public::from_slice(pubkey)?)
+        Public::from_slice(pubkey).map_err(MmError::from)
     }
 
     #[inline]
@@ -1247,6 +1274,10 @@ impl From<NumConversError> for GenerateTxError {
     fn from(e: NumConversError) -> Self { GenerateTxError::Internal(e.to_string()) }
 }
 
+impl From<keys::Error> for GenerateTxError {
+    fn from(e: keys::Error) -> Self { GenerateTxError::Internal(e.to_string()) }
+}
+
 pub enum RequestTxHistoryResult {
     Ok(Vec<(H256Json, u64)>),
     Retry { error: String },
@@ -1414,7 +1445,7 @@ pub struct UtxoActivationParams {
     /// This determines which Address of the HD account to be used for swaps for this UTXO coin.
     /// If not specified, the first non-change address for the first account is used.
     #[serde(default)]
-    pub path_to_address: StandardHDCoinAddress,
+    pub path_to_address: HDPathAccountToAddressId,
 }
 
 #[derive(Debug, Display)]
@@ -1469,7 +1500,7 @@ impl UtxoActivationParams {
         let priv_key_policy = json::from_value::<Option<PrivKeyActivationPolicy>>(req["priv_key_policy"].clone())
             .map_to_mm(UtxoFromLegacyReqErr::InvalidPrivKeyPolicy)?
             .unwrap_or(PrivKeyActivationPolicy::ContextPrivKey);
-        let path_to_address = json::from_value::<Option<StandardHDCoinAddress>>(req["path_to_address"].clone())
+        let path_to_address = json::from_value::<Option<HDPathAccountToAddressId>>(req["path_to_address"].clone())
             .map_to_mm(UtxoFromLegacyReqErr::InvalidAddressIndex)?
             .unwrap_or_default();
 
@@ -1514,113 +1545,6 @@ impl Default for ElectrumBuilderArgs {
             spawn_ping: true,
             negotiate_version: true,
             collect_metrics: true,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct UtxoHDWallet {
-    pub hd_wallet_rmd160: H160,
-    pub hd_wallet_storage: HDWalletCoinStorage,
-    pub address_format: UtxoAddressFormat,
-    /// Derivation path of the coin.
-    /// This derivation path consists of `purpose` and `coin_type` only
-    /// where the full `BIP44` address has the following structure:
-    /// `m/purpose'/coin_type'/account'/change/address_index`.
-    pub derivation_path: StandardHDPathToCoin,
-    /// User accounts.
-    pub accounts: HDAccountsMutex<UtxoHDAccount>,
-    // The max number of empty addresses in a row.
-    // If transactions were sent to an address outside the `gap_limit`, they will not be identified.
-    pub gap_limit: u32,
-}
-
-impl HDWalletOps for UtxoHDWallet {
-    type HDAccount = UtxoHDAccount;
-
-    fn coin_type(&self) -> u32 { self.derivation_path.coin_type() }
-
-    fn gap_limit(&self) -> u32 { self.gap_limit }
-
-    fn get_accounts_mutex(&self) -> &HDAccountsMutex<Self::HDAccount> { &self.accounts }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct HDAddressesCache {
-    cache: Arc<AsyncMutex<HashMap<HDAddressId, UtxoHDAddress>>>,
-}
-
-impl HDAddressesCache {
-    pub fn with_capacity(capacity: usize) -> HDAddressesCache {
-        HDAddressesCache {
-            cache: Arc::new(AsyncMutex::new(HashMap::with_capacity(capacity))),
-        }
-    }
-
-    pub async fn lock(&self) -> AsyncMutexGuard<'_, HashMap<HDAddressId, UtxoHDAddress>> { self.cache.lock().await }
-}
-
-#[derive(Clone, Debug)]
-pub struct UtxoHDAccount {
-    pub account_id: u32,
-    /// [Extended public key](https://learnmeabitcoin.com/technical/extended-keys) that corresponds to the derivation path:
-    /// `m/purpose'/coin_type'/account'`.
-    pub extended_pubkey: Secp256k1ExtendedPublicKey,
-    /// [`UtxoHDWallet::derivation_path`] derived by [`UtxoHDAccount::account_id`].
-    pub account_derivation_path: StandardHDPathToAccount,
-    /// The number of addresses that we know have been used by the user.
-    /// This is used in order not to check the transaction history for each address,
-    /// but to request the balance of addresses whose index is less than `address_number`.
-    pub external_addresses_number: u32,
-    pub internal_addresses_number: u32,
-    /// The cache of derived addresses.
-    /// This is used at [`HDWalletCoinOps::derive_address`].
-    pub derived_addresses: HDAddressesCache,
-}
-
-impl HDAccountOps for UtxoHDAccount {
-    fn known_addresses_number(&self, chain: Bip44Chain) -> MmResult<u32, InvalidBip44ChainError> {
-        match chain {
-            Bip44Chain::External => Ok(self.external_addresses_number),
-            Bip44Chain::Internal => Ok(self.internal_addresses_number),
-        }
-    }
-
-    fn account_derivation_path(&self) -> DerivationPath { self.account_derivation_path.to_derivation_path() }
-
-    fn account_id(&self) -> u32 { self.account_id }
-}
-
-impl UtxoHDAccount {
-    pub fn try_from_storage_item(
-        wallet_der_path: &StandardHDPathToCoin,
-        account_info: &HDAccountStorageItem,
-    ) -> HDWalletStorageResult<UtxoHDAccount> {
-        const ACCOUNT_CHILD_HARDENED: bool = true;
-
-        let account_child = ChildNumber::new(account_info.account_id, ACCOUNT_CHILD_HARDENED)?;
-        let account_derivation_path = wallet_der_path
-            .derive(account_child)
-            .map_to_mm(StandardHDPathError::from)?;
-        let extended_pubkey = Secp256k1ExtendedPublicKey::from_str(&account_info.account_xpub)?;
-        let capacity =
-            account_info.external_addresses_number + account_info.internal_addresses_number + DEFAULT_GAP_LIMIT;
-        Ok(UtxoHDAccount {
-            account_id: account_info.account_id,
-            extended_pubkey,
-            account_derivation_path,
-            external_addresses_number: account_info.external_addresses_number,
-            internal_addresses_number: account_info.internal_addresses_number,
-            derived_addresses: HDAddressesCache::with_capacity(capacity as usize),
-        })
-    }
-
-    pub fn to_storage_item(&self) -> HDAccountStorageItem {
-        HDAccountStorageItem {
-            account_id: self.account_id,
-            account_xpub: self.extended_pubkey.to_string(bip32::Prefix::XPUB),
-            external_addresses_number: self.external_addresses_number,
-            internal_addresses_number: self.internal_addresses_number,
         }
     }
 }
@@ -1757,9 +1681,9 @@ pub async fn kmd_rewards_info<T: UtxoCommonOps>(coin: &T) -> Result<Vec<KmdRewar
     }
 
     let utxo = coin.as_ref();
-    let my_address = try_s!(utxo.derivation_method.single_addr_or_err());
+    let my_address = try_s!(utxo.derivation_method.single_addr_or_err().await);
     let rpc_client = &utxo.rpc_client;
-    let mut unspents = try_s!(rpc_client.list_unspent(my_address, utxo.decimals).compat().await);
+    let mut unspents = try_s!(rpc_client.list_unspent(&my_address, utxo.decimals).compat().await);
     // Reorder from highest to lowest unspent outputs.
     unspents.sort_unstable_by(|x, y| y.value.cmp(&x.value));
 
@@ -1824,8 +1748,8 @@ async fn send_outputs_from_my_address_impl<T>(
 where
     T: UtxoCommonOps + GetUtxoListOps,
 {
-    let my_address = try_tx_s!(coin.as_ref().derivation_method.single_addr_or_err());
-    let (unspents, recently_sent_txs) = try_tx_s!(coin.get_unspent_ordered_list(my_address).await);
+    let my_address = try_tx_s!(coin.as_ref().derivation_method.single_addr_or_err().await);
+    let (unspents, recently_sent_txs) = try_tx_s!(coin.get_unspent_ordered_list(&my_address).await);
     generate_and_send_tx(&coin, unspents, None, FeePolicy::SendExact, recently_sent_txs, outputs).await
 }
 
@@ -1841,10 +1765,11 @@ async fn generate_and_send_tx<T>(
 where
     T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps + UtxoTxBroadcastOps,
 {
-    let my_address = try_tx_s!(coin.as_ref().derivation_method.single_addr_or_err());
+    let my_address = try_tx_s!(coin.as_ref().derivation_method.single_addr_or_err().await);
     let key_pair = try_tx_s!(coin.as_ref().priv_key_policy.activated_key_or_err());
 
     let mut builder = UtxoTxBuilder::new(coin)
+        .await
         .add_available_inputs(unspents)
         .add_outputs(outputs)
         .with_fee_policy(fee_policy);
@@ -1860,19 +1785,18 @@ where
             outpoint: input.previous_output,
             value: input.amount,
             height: None,
+            script: input.prev_script.clone(),
         })
         .collect();
 
-    let signature_version = match &my_address.addr_format {
+    let signature_version = match my_address.addr_format() {
         UtxoAddressFormat::Segwit => SignatureVersion::WitnessV0,
         _ => coin.as_ref().conf.signature_version,
     };
 
-    let prev_script = Builder::build_p2pkh(&my_address.hash);
     let signed = try_tx_s!(sign_tx(
         unsigned,
         key_pair,
-        prev_script,
         signature_version,
         coin.as_ref().conf.fork_id
     ));
@@ -1884,17 +1808,18 @@ where
     Ok(signed)
 }
 
-pub fn output_script(address: &Address, script_type: ScriptType) -> Script {
-    match address.addr_format {
-        UtxoAddressFormat::Segwit => Builder::build_witness_script(&address.hash),
-        _ => match script_type {
-            ScriptType::P2PKH => Builder::build_p2pkh(&address.hash),
-            ScriptType::P2SH => Builder::build_p2sh(&address.hash),
-            ScriptType::P2WPKH => Builder::build_witness_script(&address.hash),
-            ScriptType::P2WSH => Builder::build_witness_script(&address.hash),
-        },
+/// Builds transaction output script for an Address struct
+pub fn output_script(address: &Address) -> Result<Script, keys::Error> {
+    match address.script_type() {
+        AddressScriptType::P2PKH => Ok(Builder::build_p2pkh(address.hash())),
+        AddressScriptType::P2SH => Ok(Builder::build_p2sh(address.hash())),
+        AddressScriptType::P2WPKH => Builder::build_p2wpkh(address.hash()),
+        AddressScriptType::P2WSH => Builder::build_p2wsh(address.hash()),
     }
 }
+
+/// Builds transaction output script for a legacy P2PK address
+pub fn output_script_p2pk(pubkey: &Public) -> Script { Builder::build_p2pk(pubkey) }
 
 pub fn address_by_conf_and_pubkey_str(
     coin: &str,
@@ -1915,21 +1840,21 @@ pub fn address_by_conf_and_pubkey_str(
         priv_key_policy: PrivKeyActivationPolicy::ContextPrivKey,
         check_utxo_maturity: None,
         // This will not be used since the pubkey from orderbook/etc.. will be used to generate the address
-        path_to_address: StandardHDCoinAddress::default(),
+        path_to_address: HDPathAccountToAddressId::default(),
     };
     let conf_builder = UtxoConfBuilder::new(conf, &params, coin);
     let utxo_conf = try_s!(conf_builder.build());
     let pubkey_bytes = try_s!(hex::decode(pubkey));
-    let hash = dhash160(&pubkey_bytes);
+    let pubkey = try_s!(Public::from_slice(&pubkey_bytes));
 
-    let address = Address {
-        prefix: utxo_conf.pub_addr_prefix,
-        t_addr_prefix: utxo_conf.pub_t_addr_prefix,
-        hash: hash.into(),
-        checksum_type: utxo_conf.checksum_type,
-        hrp: utxo_conf.bech32_hrp,
+    let address = AddressBuilder::new(
         addr_format,
-    };
+        utxo_conf.checksum_type,
+        utxo_conf.address_prefixes,
+        utxo_conf.bech32_hrp,
+    )
+    .as_pkh_from_pk(pubkey)
+    .build()?;
     address.display_address()
 }
 

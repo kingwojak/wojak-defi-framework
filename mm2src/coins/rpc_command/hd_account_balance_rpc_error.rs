@@ -26,6 +26,8 @@ pub enum HDAccountBalanceRpcError {
     WalletStorageError(String),
     #[display(fmt = "Electrum/Native RPC invalid response: {}", _0)]
     RpcInvalidResponse(String),
+    #[display(fmt = "Failed scripthash subscription. Error: {_0}")]
+    FailedScripthashSubscription(String),
     #[display(fmt = "Transport: {}", _0)]
     Transport(String),
     #[display(fmt = "Internal: {}", _0)]
@@ -44,6 +46,7 @@ impl HttpStatusCode for HDAccountBalanceRpcError {
             HDAccountBalanceRpcError::Transport(_)
             | HDAccountBalanceRpcError::WalletStorageError(_)
             | HDAccountBalanceRpcError::RpcInvalidResponse(_)
+            | HDAccountBalanceRpcError::FailedScripthashSubscription(_)
             | HDAccountBalanceRpcError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -85,9 +88,7 @@ impl From<AddressDerivingError> for HDAccountBalanceRpcError {
     fn from(e: AddressDerivingError) -> Self {
         match e {
             AddressDerivingError::InvalidBip44Chain { chain } => HDAccountBalanceRpcError::InvalidBip44Chain { chain },
-            AddressDerivingError::Bip32Error(bip32) => {
-                HDAccountBalanceRpcError::ErrorDerivingAddress(bip32.to_string())
-            },
+            AddressDerivingError::Bip32Error(bip32) => HDAccountBalanceRpcError::ErrorDerivingAddress(bip32),
             AddressDerivingError::Internal(internal) => HDAccountBalanceRpcError::Internal(internal),
         }
     }

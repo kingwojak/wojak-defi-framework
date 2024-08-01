@@ -1,5 +1,5 @@
 /******************************************************************************
- * Copyright © 2023 Pampex LTD and TillyHK LTD              *
+ * Copyright © 2023 Pampex LTD and TillyHK LTD                                *
  *                                                                            *
  * See the CONTRIBUTOR-LICENSE-AGREEMENT, COPYING, LICENSE-COPYRIGHT-NOTICE   *
  * and DEVELOPER-CERTIFICATE-OF-ORIGIN files in the LEGAL directory in        *
@@ -49,6 +49,7 @@ use std::ptr::null;
 use std::str;
 
 #[path = "lp_native_dex.rs"] mod lp_native_dex;
+pub use self::lp_native_dex::init_hw;
 pub use self::lp_native_dex::lp_init;
 use coins::update_coins_config;
 use mm2_err_handle::prelude::*;
@@ -57,12 +58,14 @@ use mm2_err_handle::prelude::*;
 #[path = "database.rs"]
 pub mod database;
 
+#[path = "heartbeat_event.rs"] pub mod heartbeat_event;
 #[path = "lp_dispatcher.rs"] pub mod lp_dispatcher;
 #[path = "lp_message_service.rs"] pub mod lp_message_service;
 #[path = "lp_network.rs"] pub mod lp_network;
 #[path = "lp_ordermatch.rs"] pub mod lp_ordermatch;
 #[path = "lp_stats.rs"] pub mod lp_stats;
 #[path = "lp_swap.rs"] pub mod lp_swap;
+#[path = "lp_wallet.rs"] pub mod lp_wallet;
 #[path = "rpc.rs"] pub mod rpc;
 
 pub const PASSWORD_MAXIMUM_CONSECUTIVE_CHARACTERS: usize = 3;
@@ -109,7 +112,7 @@ pub async fn lp_main(
 ) -> Result<(), String> {
     let log_filter = params.filter.unwrap_or_default();
     // Logger can be initialized once.
-    // If `mm2` is linked as a library, and `mm2` is restarted, `init_logger` returns an error.
+    // If `kdf` is linked as a library, and `kdf` is restarted, `init_logger` returns an error.
     init_logger(log_filter, params.conf["silent_console"].as_bool().unwrap_or_default()).ok();
 
     let conf = params.conf;
@@ -165,7 +168,7 @@ Some (but not all) of the JSON configuration parameters (* - required):
                      If the field isn't present on the command line then we try loading it from the 'coins' file.
   crash          ..  Simulate a crash to check how the crash handling works.
   dbdir          ..  MM database path. 'DB' by default.
-  gui            ..  The information about GUI app using MM2 instance. Included in swap statuses shared with network.
+  gui            ..  The information about GUI app using KDF instance. Included in swap statuses shared with network.
                  ..  It's recommended to put essential info to this field (application name, OS, version, etc).
                  ..  e.g. AtomicDEX iOS 1.0.1000.
   myipaddr       ..  IP address to bind to for P2P networking.
@@ -181,7 +184,7 @@ Some (but not all) of the JSON configuration parameters (* - required):
   rpc_local_only ..  MM forbids some RPC requests from not loopback (localhost) IPs as additional security measure.
                      Defaults to `true`, set `false` to disable. `Use with caution`.
   rpcport        ..  If > 1000 overrides the 7783 default.
-  i_am_seed      ..  Activate the seed node mode (acting as a relay for mm2 clients).
+  i_am_seed      ..  Activate the seed node mode (acting as a relay for kdf clients).
                      Defaults to `false`.
   seednodes      ..  Seednode IPs that node will use.
                      At least one seed IP must be present if the node is not a seed itself.
@@ -275,7 +278,7 @@ pub fn mm2_main(version: String, datetime: String) {
 /// Parses and returns the `first_arg` as JSON.
 /// Attempts to load the config from `MM2.json` file if `first_arg` is None
 pub fn get_mm2config(first_arg: Option<&str>) -> Result<Json, String> {
-    let conf_path = env::var("MM_CONF_PATH").unwrap_or_else(|_| "MM2.json".into());
+    let conf_path = common::kdf_config_file();
     let conf_from_file = slurp(&conf_path);
     let conf = match first_arg {
         Some(s) => s,
@@ -283,7 +286,7 @@ pub fn get_mm2config(first_arg: Option<&str>) -> Result<Json, String> {
             if conf_from_file.is_empty() {
                 return ERR!(
                     "Config is not set from command line arg and {} file doesn't exist.",
-                    conf_path
+                    conf_path.display()
                 );
             }
             try_s!(std::str::from_utf8(&conf_from_file))
@@ -299,12 +302,13 @@ pub fn get_mm2config(first_arg: Option<&str>) -> Result<Json, String> {
     };
 
     if conf["coins"].is_null() {
-        let coins_path = env::var("MM_COINS_PATH").unwrap_or_else(|_| "coins".into());
+        let coins_path = common::kdf_coins_file();
+
         let coins_from_file = slurp(&coins_path);
         if coins_from_file.is_empty() {
             return ERR!(
                 "No coins are set in JSON config and '{}' file doesn't exist",
-                coins_path
+                coins_path.display()
             );
         }
         conf["coins"] = match json::from_slice(&coins_from_file) {

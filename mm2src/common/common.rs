@@ -123,10 +123,12 @@ pub mod write_safe;
 #[macro_use]
 pub mod log;
 
+pub mod bool_as_int;
 pub mod crash_reports;
 pub mod custom_futures;
 pub mod custom_iter;
 #[path = "executor/mod.rs"] pub mod executor;
+pub mod expirable_map;
 pub mod number_type_casting;
 pub mod password_policy;
 pub mod seri;
@@ -186,11 +188,17 @@ cfg_wasm32! {
     use std::sync::atomic::AtomicUsize;
 }
 
+// Directory used to store configuration and database files within the user's home directory.
+#[cfg(not(target_arch = "wasm32"))]
+const KOMODO_DEFI_FRAMEWORK_DIR_NAME: &str = ".kdf";
+
 pub const X_GRPC_WEB: &str = "x-grpc-web";
-pub const X_API_KEY: &str = "X-API-Key";
+pub const X_AUTH_PAYLOAD: &str = "X-Auth-Payload";
 pub const APPLICATION_JSON: &str = "application/json";
 pub const APPLICATION_GRPC_WEB: &str = "application/grpc-web";
 pub const APPLICATION_GRPC_WEB_PROTO: &str = "application/grpc-web+proto";
+pub const APPLICATION_GRPC_WEB_TEXT: &str = "application/grpc-web-text";
+pub const APPLICATION_GRPC_WEB_TEXT_PROTO: &str = "application/grpc-web-text+proto";
 
 pub const SATOSHIS: u64 = 100_000_000;
 
@@ -348,7 +356,7 @@ pub fn filename(path: &str) -> &str {
 /// Some common and less than useful frames are skipped.
 pub fn stack_trace_frame(instr_ptr: *mut c_void, buf: &mut dyn Write, symbol: &backtrace::Symbol) {
     let filename = match symbol.filename() {
-        Some(path) => match path.components().rev().next() {
+        Some(path) => match path.components().next_back() {
             Some(c) => c.as_os_str().to_string_lossy(),
             None => "??".into(),
         },
@@ -770,6 +778,57 @@ pub fn writeln(line: &str) {
     append_log_tail(line);
 }
 
+/// Returns the path for application directory of kdf(komodo-defi-framework).
+#[allow(deprecated)]
+pub fn kdf_app_dir() -> Option<PathBuf> {
+    #[cfg(not(target_arch = "wasm32"))]
+    return Some(env::home_dir()?.join(KOMODO_DEFI_FRAMEWORK_DIR_NAME));
+
+    #[cfg(target_arch = "wasm32")]
+    None
+}
+
+/// Returns path of the coins file.
+pub fn kdf_coins_file() -> PathBuf {
+    #[cfg(not(target_arch = "wasm32"))]
+    let value_from_env = env::var("MM_COINS_PATH").ok();
+
+    #[cfg(target_arch = "wasm32")]
+    let value_from_env = None;
+
+    find_kdf_dependency_file(value_from_env, "coins")
+}
+
+/// Returns path of the config file.
+pub fn kdf_config_file() -> PathBuf {
+    #[cfg(not(target_arch = "wasm32"))]
+    let value_from_env = env::var("MM_CONF_PATH").ok();
+
+    #[cfg(target_arch = "wasm32")]
+    let value_from_env = None;
+
+    find_kdf_dependency_file(value_from_env, "MM2.json")
+}
+
+/// Returns the desired file path for kdf(komodo-defi-framework).
+///
+/// Path priority:
+///  1- From the environment variable.
+///  2- From the current directory where app is called.
+///  3- From the root application directory.
+pub fn find_kdf_dependency_file(value_from_env: Option<String>, path_leaf: &str) -> PathBuf {
+    if let Some(path) = value_from_env {
+        return PathBuf::from(path);
+    }
+
+    let from_current_dir = PathBuf::from(path_leaf);
+    if from_current_dir.exists() {
+        from_current_dir
+    } else {
+        kdf_app_dir().unwrap_or_default().join(path_leaf)
+    }
+}
+
 pub fn small_rng() -> SmallRng { SmallRng::seed_from_u64(now_ms()) }
 
 #[inline(always)]
@@ -996,6 +1055,9 @@ impl<Id> Default for PagingOptionsEnum<Id> {
 pub fn get_utc_timestamp() -> i64 { Utc::now().timestamp() }
 
 #[inline(always)]
+pub fn get_utc_timestamp_nanos() -> i64 { Utc::now().timestamp_nanos() }
+
+#[inline(always)]
 pub fn get_local_duration_since_epoch() -> Result<Duration, SystemTimeError> {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
 }
@@ -1059,9 +1121,10 @@ pub fn http_uri_to_ws_address(uri: http::Uri) -> String {
     };
 
     let host_address = uri.host().expect("Host can't be empty.");
+    let path = if uri.path() == "/" { "" } else { uri.path() };
     let port = uri.port_u16().map(|p| format!(":{}", p)).unwrap_or_default();
 
-    format!("{}{}{}", address_prefix, host_address, port)
+    format!("{}{}{}{}", address_prefix, host_address, port, path)
 }
 
 #[test]
@@ -1070,13 +1133,22 @@ fn test_http_uri_to_ws_address() {
     let ws_connection = http_uri_to_ws_address(uri);
     assert_eq!(ws_connection, "wss://cosmos-rpc.polkachu.com");
 
-    let uri = "http://cosmos-rpc.polkachu.com".parse::<http::Uri>().unwrap();
+    let uri = "http://cosmos-rpc.polkachu.com/".parse::<http::Uri>().unwrap();
     let ws_connection = http_uri_to_ws_address(uri);
     assert_eq!(ws_connection, "ws://cosmos-rpc.polkachu.com");
 
     let uri = "http://34.82.96.8:26657".parse::<http::Uri>().unwrap();
     let ws_connection = http_uri_to_ws_address(uri);
     assert_eq!(ws_connection, "ws://34.82.96.8:26657");
+
+    let uri = "https://cosmos.blockpi.network/rpc/v1/65cc8a9ffe1627352b911dd4b7c751db4a3eaee3"
+        .parse::<http::Uri>()
+        .unwrap();
+    let ws_connection = http_uri_to_ws_address(uri);
+    assert_eq!(
+        ws_connection,
+        "wss://cosmos.blockpi.network/rpc/v1/65cc8a9ffe1627352b911dd4b7c751db4a3eaee3"
+    );
 }
 
 #[test]

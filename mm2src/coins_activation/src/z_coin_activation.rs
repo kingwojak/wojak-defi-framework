@@ -1,7 +1,7 @@
 use crate::context::CoinsActivationContext;
 use crate::prelude::*;
 use crate::standalone_coin::{InitStandaloneCoinActivationOps, InitStandaloneCoinError,
-                             InitStandaloneCoinInitialStatus, InitStandaloneCoinTaskHandle,
+                             InitStandaloneCoinInitialStatus, InitStandaloneCoinTaskHandleShared,
                              InitStandaloneCoinTaskManagerShared};
 use async_trait::async_trait;
 use coins::coin_balance::{CoinBalanceReport, IguanaWalletBalance};
@@ -9,7 +9,7 @@ use coins::my_tx_history_v2::TxHistoryStorage;
 use coins::tx_history_storage::CreateTxHistoryStorageError;
 use coins::z_coin::{z_coin_from_conf_and_params, BlockchainScanStopped, FirstSyncBlock, SyncStatus, ZCoin,
                     ZCoinBuildError, ZcoinActivationParams, ZcoinProtocolInfo};
-use coins::{BalanceError, CoinProtocol, MarketCoinOps, PrivKeyBuildPolicy, RegisterCoinError};
+use coins::{BalanceError, CoinBalance, CoinProtocol, MarketCoinOps, PrivKeyBuildPolicy, RegisterCoinError};
 use crypto::hw_rpc_task::{HwRpcTaskAwaitingStatus, HwRpcTaskUserAction};
 use crypto::CryptoCtxError;
 use derive_more::Display;
@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 pub type ZcoinTaskManagerShared = InitStandaloneCoinTaskManagerShared<ZCoin>;
-pub type ZcoinRpcTaskHandle = InitStandaloneCoinTaskHandle<ZCoin>;
+pub type ZcoinRpcTaskHandleShared = InitStandaloneCoinTaskHandleShared<ZCoin>;
 pub type ZcoinAwaitingStatus = HwRpcTaskAwaitingStatus;
 pub type ZcoinUserAction = HwRpcTaskUserAction;
 
@@ -43,8 +43,8 @@ pub type ZcoinUserAction = HwRpcTaskUserAction;
 pub struct ZcoinActivationResult {
     pub ticker: String,
     pub current_block: u64,
-    pub wallet_balance: CoinBalanceReport,
-    pub first_sync_block: Option<FirstSyncBlock>,
+    pub wallet_balance: CoinBalanceReport<CoinBalance>,
+    pub first_sync_block: FirstSyncBlock,
 }
 
 impl CurrentBlock for ZcoinActivationResult {
@@ -53,7 +53,11 @@ impl CurrentBlock for ZcoinActivationResult {
 
 impl GetAddressesBalances for ZcoinActivationResult {
     fn get_addresses_balances(&self) -> HashMap<String, BigDecimal> {
-        self.wallet_balance.to_addresses_total_balances()
+        self.wallet_balance
+            .to_addresses_total_balances(&self.ticker)
+            .into_iter()
+            .map(|(address, balance)| (address, balance.unwrap_or_default()))
+            .collect()
     }
 }
 
@@ -77,12 +81,10 @@ impl GetAddressesBalances for ZcoinActivationResult {
 pub enum ZcoinInProgressStatus {
     ActivatingCoin,
     UpdatingBlocksCache {
-        first_sync_block: FirstSyncBlock,
         current_scanned_block: u64,
         latest_block: u64,
     },
     BuildingWalletDb {
-        first_sync_block: FirstSyncBlock,
         current_scanned_block: u64,
         latest_block: u64,
     },
@@ -227,7 +229,7 @@ impl InitStandaloneCoinActivationOps for ZCoin {
         coin_conf: Json,
         activation_request: &ZcoinActivationParams,
         protocol_info: ZcoinProtocolInfo,
-        task_handle: &ZcoinRpcTaskHandle,
+        task_handle: ZcoinRpcTaskHandleShared,
     ) -> MmResult<Self, ZcoinInitError> {
         // When `ZCoin` supports Trezor, we'll need to check [`ZcoinActivationParams::priv_key_policy`]
         // instead of using [`PrivKeyBuildPolicy::detect_priv_key_policy`].
@@ -247,20 +249,16 @@ impl InitStandaloneCoinActivationOps for ZCoin {
         loop {
             let in_progress_status = match coin.sync_status().await? {
                 SyncStatus::UpdatingBlocksCache {
-                    first_sync_block,
                     current_scanned_block,
                     latest_block,
                 } => ZcoinInProgressStatus::UpdatingBlocksCache {
-                    first_sync_block,
                     current_scanned_block,
                     latest_block,
                 },
                 SyncStatus::BuildingWalletDb {
-                    first_sync_block,
                     current_scanned_block,
                     latest_block,
                 } => ZcoinInProgressStatus::BuildingWalletDb {
-                    first_sync_block,
                     current_scanned_block,
                     latest_block,
                 },
@@ -276,7 +274,7 @@ impl InitStandaloneCoinActivationOps for ZCoin {
     async fn get_activation_result(
         &self,
         _ctx: MmArc,
-        task_handle: &ZcoinRpcTaskHandle,
+        task_handle: ZcoinRpcTaskHandleShared,
         _activation_request: &Self::ActivationRequest,
     ) -> MmResult<Self::ActivationResult, ZcoinInitError> {
         task_handle.update_in_progress_status(ZcoinInProgressStatus::RequestingWalletBalance)?;
@@ -287,12 +285,7 @@ impl InitStandaloneCoinActivationOps for ZCoin {
             .map_to_mm(ZcoinInitError::CouldNotGetBlockCount)?;
 
         let balance = self.my_balance().compat().await?;
-        let first_sync_block = match self.sync_status().await? {
-            SyncStatus::Finished { first_sync_block, .. }
-            | SyncStatus::BuildingWalletDb { first_sync_block, .. }
-            | SyncStatus::UpdatingBlocksCache { first_sync_block, .. } => Some(first_sync_block),
-            _ => None,
-        };
+        let first_sync_block = self.first_sync_block().await?;
 
         Ok(ZcoinActivationResult {
             ticker: self.ticker().into(),

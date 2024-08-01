@@ -1,13 +1,15 @@
 //! Helpers used in the unit and integration tests.
 
+#![allow(missing_docs)]
+
 use crate::electrums::qtum_electrums;
 use crate::structs::*;
 use common::custom_futures::repeatable::{Ready, Retry};
 use common::executor::Timer;
-use common::log::debug;
-use common::{cfg_native, now_float, now_ms, now_sec, repeatable, wait_until_ms, PagingOptionsEnum};
+use common::log::{debug, info};
+use common::{cfg_native, now_float, now_ms, now_sec, repeatable, wait_until_ms, wait_until_sec, PagingOptionsEnum};
 use common::{get_utc_timestamp, log};
-use crypto::{CryptoCtx, StandardHDCoinAddress};
+use crypto::CryptoCtx;
 use gstuff::{try_s, ERR, ERRL};
 use http::{HeaderMap, StatusCode};
 use lazy_static::lazy_static;
@@ -21,7 +23,6 @@ use serde_json::{self as json, json, Value as Json};
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::env;
-#[cfg(not(target_arch = "wasm32"))] use std::io::Write;
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::process::Child;
@@ -41,6 +42,7 @@ cfg_native! {
     use http::Request;
     use regex::Regex;
     use std::fs;
+    use std::io::Write;
     use std::net::Ipv4Addr;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -205,8 +207,18 @@ pub const ZOMBIE_LIGHTWALLETD_URLS: &[&str] = &[
     "https://piratelightd3.cryptoforge.cc:443",
     "https://piratelightd4.cryptoforge.cc:443",
 ];
+#[cfg(not(target_arch = "wasm32"))]
 pub const PIRATE_ELECTRUMS: &[&str] = &["node1.chainkeeper.pro:10132"];
+#[cfg(target_arch = "wasm32")]
+pub const PIRATE_ELECTRUMS: &[&str] = &[
+    "electrum3.cipig.net:30008",
+    "electrum1.cipig.net:30008",
+    "electrum2.cipig.net:30008",
+];
+#[cfg(not(target_arch = "wasm32"))]
 pub const PIRATE_LIGHTWALLETD_URLS: &[&str] = &["http://node1.chainkeeper.pro:443"];
+#[cfg(target_arch = "wasm32")]
+pub const PIRATE_LIGHTWALLETD_URLS: &[&str] = &["https://pirate.battlefield.earth:8581"];
 pub const DEFAULT_RPC_PASSWORD: &str = "pass";
 pub const QRC20_ELECTRUMS: &[&str] = &[
     "electrum1.cipig.net:10071",
@@ -221,15 +233,11 @@ pub const TBTC_ELECTRUMS: &[&str] = &[
 ];
 
 pub const ETH_MAINNET_NODE: &str = "https://mainnet.infura.io/v3/c01c1b4cf66642528547624e1d6d9d6b";
+pub const ETH_MAINNET_CHAIN_ID: u64 = 1;
 pub const ETH_MAINNET_SWAP_CONTRACT: &str = "0x24abe4c71fc658c91313b6552cd40cd808b3ea80";
 
-pub const ETH_DEV_NODE: &str = "http://195.201.137.5:8545";
-pub const ETH_DEV_NODES: &[&str] = &["http://195.201.137.5:8545"];
-pub const ETH_DEV_SWAP_CONTRACT: &str = "0x83965c539899cc0f918552e5a26915de40ee8852";
-pub const ETH_DEV_FALLBACK_CONTRACT: &str = "0xEA6CFe3D0f6B8814A88027b9cA865b82816409a4";
-pub const ETH_DEV_TOKEN_CONTRACT: &str = "0x6c2858f6aFaC835c43ffDa248aFA167e1a58436C";
-
-pub const ETH_SEPOLIA_NODE: &[&str] = &["https://rpc2.sepolia.org"];
+pub const ETH_SEPOLIA_NODES: &[&str] = &["https://rpc2.sepolia.org"];
+pub const ETH_SEPOLIA_CHAIN_ID: u64 = 11155111;
 pub const ETH_SEPOLIA_SWAP_CONTRACT: &str = "0xeA6D65434A15377081495a9E7C5893543E7c32cB";
 pub const ETH_SEPOLIA_TOKEN_CONTRACT: &str = "0x09d0d71FBC00D7CCF9CFf132f5E6825C88293F19";
 
@@ -281,6 +289,22 @@ impl Mm2TestConf {
                 "rpc_password": DEFAULT_RPC_PASSWORD,
                 "i_am_seed": true,
                 "enable_hd": true,
+            }),
+            rpc_password: DEFAULT_RPC_PASSWORD.into(),
+        }
+    }
+
+    pub fn seednode_with_hd_account_trade_v2(passphrase: &str, coins: &Json) -> Self {
+        Mm2TestConf {
+            conf: json!({
+                "gui": "nogui",
+                "netid": 9998,
+                "passphrase": passphrase,
+                "coins": coins,
+                "rpc_password": DEFAULT_RPC_PASSWORD,
+                "i_am_seed": true,
+                "enable_hd": true,
+                "use_trading_proto_v2": true,
             }),
             rpc_password: DEFAULT_RPC_PASSWORD.into(),
         }
@@ -347,6 +371,22 @@ impl Mm2TestConf {
         }
     }
 
+    pub fn light_node_with_hd_account_trade_v2(passphrase: &str, coins: &Json, seednodes: &[&str]) -> Self {
+        Mm2TestConf {
+            conf: json!({
+                "gui": "nogui",
+                "netid": 9998,
+                "passphrase": passphrase,
+                "coins": coins,
+                "rpc_password": DEFAULT_RPC_PASSWORD,
+                "seednodes": seednodes,
+                "enable_hd": true,
+                "use_trading_proto_v2": true,
+            }),
+            rpc_password: DEFAULT_RPC_PASSWORD.into(),
+        }
+    }
+
     pub fn no_login_node(coins: &Json, seednodes: &[&str]) -> Self {
         Mm2TestConf {
             conf: json!({
@@ -365,10 +405,10 @@ pub struct Mm2TestConfForSwap;
 
 impl Mm2TestConfForSwap {
     /// TODO consider moving it to read it from a env file.
-    const BOB_HD_PASSPHRASE: &'static str =
+    pub const BOB_HD_PASSPHRASE: &'static str =
         "involve work eager scene give acoustic tooth mimic dance smoke hold foster";
     /// TODO consider moving it to read it from a env file.
-    const ALICE_HD_PASSPHRASE: &'static str =
+    pub const ALICE_HD_PASSPHRASE: &'static str =
         "tank abandon bind salon remove wisdom net size aspect direct source fossil";
 
     pub fn bob_conf_with_policy(priv_key_policy: &Mm2InitPrivKeyPolicy, coins: &Json) -> Mm2TestConf {
@@ -477,6 +517,20 @@ pub fn rick_conf() -> Json {
     })
 }
 
+pub fn doc_conf() -> Json {
+    json!({
+        "coin":"DOC",
+        "asset":"DOC",
+        "required_confirmations":0,
+        "txversion":4,
+        "overwintered":1,
+        "derivation_path": "m/44'/141'",
+        "protocol":{
+            "type":"UTXO"
+        }
+    })
+}
+
 pub fn morty_conf() -> Json {
     json!({
         "coin":"MORTY",
@@ -539,7 +593,7 @@ pub fn atom_testnet_conf() -> Json {
                 "decimals": 6,
                 "denom": "uatom",
                 "account_prefix": "cosmos",
-                "chain_id": "theta-testnet-001",
+                "chain_id": "cosmoshub-testnet",
             },
         },
         "derivation_path": "m/44'/118'",
@@ -645,8 +699,7 @@ pub fn tbtc_conf() -> Json {
         "wiftype": 239,
         "segwit": true,
         "bech32_hrp": "tb",
-        "txfee": 0,
-        "estimate_fee_mode": "ECONOMICAL",
+        "txfee": 1000,
         "required_confirmations": 0,
         "protocol": {
             "type": "UTXO"
@@ -663,8 +716,7 @@ pub fn tbtc_segwit_conf() -> Json {
         "wiftype": 239,
         "segwit": true,
         "bech32_hrp": "tb",
-        "txfee": 0,
-        "estimate_fee_mode": "ECONOMICAL",
+        "txfee": 1000,
         "required_confirmations": 0,
         "derivation_path": "m/84'/1'",
         "address_format": {
@@ -709,14 +761,104 @@ pub fn tbtc_with_spv_conf() -> Json {
     })
 }
 
-pub fn eth_testnet_conf() -> Json {
+pub fn tbtc_legacy_conf() -> Json {
+    json!({
+        "coin": "tBTC",
+        "asset":"tBTC",
+        "pubtype": 111,
+        "p2shtype": 196,
+        "wiftype": 239,
+        "segwit": false,
+        "bech32_hrp": "tb",
+        "txfee": 0,
+        "estimate_fee_mode": "ECONOMICAL",
+        "required_confirmations": 0,
+        "protocol": {
+            "type": "UTXO"
+        }
+    })
+}
+
+pub fn eth_testnet_conf_trezor() -> Json {
     json!({
         "coin": "ETH",
         "name": "ethereum",
         "mm2": 1,
+        "chain_id": 1337,
+        "max_eth_tx_type": 2,
+        "derivation_path": "m/44'/1'", // Trezor uses coin type 1 for testnet
+        "protocol": {
+            "type": "ETH"
+        },
+        "trezor_coin": "Ethereum"
+    })
+}
+
+/// ETH configuration used for dockerized Geth dev node
+pub fn eth_dev_conf() -> Json {
+    json!({
+        "coin": "ETH",
+        "name": "ethereum",
+        "mm2": 1,
+        "chain_id": 1337,
         "derivation_path": "m/44'/60'",
         "protocol": {
             "type": "ETH"
+        },
+        "max_eth_tx_type": 2
+    })
+}
+
+/// ERC20 token configuration used for dockerized Geth dev node
+pub fn erc20_dev_conf(contract_address: &str) -> Json {
+    json!({
+        "coin": "ERC20DEV",
+        "name": "erc20dev",
+        "chain_id": 1337,
+        "mm2": 1,
+        "derivation_path": "m/44'/60'",
+        "protocol": {
+            "type": "ERC20",
+            "protocol_data": {
+                "platform": "ETH",
+                "contract_address": contract_address,
+            }
+        },
+        "max_eth_tx_type": 2
+    })
+}
+
+/// global NFT configuration used for dockerized Geth dev node
+pub fn nft_dev_conf() -> Json {
+    json!({
+        "coin": "NFT_ETH",
+        "name": "nftdev",
+        "chain_id": 1337,
+        "mm2": 1,
+        "derivation_path": "m/44'/60'",
+        "protocol": {
+            "type": "NFT",
+            "protocol_data": {
+                "platform": "ETH"
+            }
+        },
+        "max_eth_tx_type": 2
+    })
+}
+
+/// global NFT configuration used for Sepolia testnet
+pub fn nft_sepolia_conf() -> Json {
+    json!({
+        "coin": "NFT_ETH",
+        "name": "nftdev",
+        "chain_id": 11155111,
+        "mm2": 1,
+        "derivation_path": "m/44'/60'",
+        "protocol": {
+            "type": "NFT",
+            "protocol_data": {
+                "platform": "ETH"
+            }
         }
     })
 }
@@ -725,10 +867,27 @@ pub fn eth_sepolia_conf() -> Json {
     json!({
         "coin": "ETH",
         "name": "ethereum",
+        "derivation_path": "m/44'/60'",
         "chain_id": 11155111,
         "protocol": {
             "type": "ETH"
-        }
+        },
+        "max_eth_tx_type": 2,
+        "trezor_coin": "Ethereum"
+    })
+}
+
+pub fn eth_sepolia_trezor_firmware_compat_conf() -> Json {
+    json!({
+        "coin": "tETH",
+        "name": "ethereum",
+        "derivation_path": "m/44'/1'", // Note: trezor uses coin type 1' for eth for testnet (SLIP44_TESTNET)
+        "chain_id": 11155111,
+        "protocol": {
+            "type": "ETH"
+        },
+        "max_eth_tx_type": 2,
+        "trezor_coin": "tETH"
     })
 }
 
@@ -736,14 +895,16 @@ pub fn eth_jst_testnet_conf() -> Json {
     json!({
         "coin": "JST",
         "name": "jst",
+        "chain_id": 1337,
         "derivation_path": "m/44'/60'",
         "protocol": {
             "type": "ERC20",
             "protocol_data": {
                 "platform": "ETH",
-                "contract_address": ETH_DEV_TOKEN_CONTRACT
+                "contract_address": ETH_SEPOLIA_TOKEN_CONTRACT
             }
-        }
+        },
+        "max_eth_tx_type": 2
     })
 }
 
@@ -752,6 +913,25 @@ pub fn jst_sepolia_conf() -> Json {
         "coin": "JST",
         "name": "jst",
         "chain_id": 11155111,
+        "protocol": {
+            "type": "ERC20",
+            "protocol_data": {
+                "platform": "ETH",
+                "chain_id": 11155111,
+                "contract_address": ETH_SEPOLIA_TOKEN_CONTRACT
+            }
+        },
+        "max_eth_tx_type": 2
+    })
+}
+
+pub fn jst_sepolia_trezor_conf() -> Json {
+    json!({
+        "coin": "tJST",
+        "name": "tjst",
+        "chain_id": 11155111,
+        "derivation_path": "m/44'/1'", // Note: Trezor uses 1' coin type for all testnets
+        "trezor_coin": "tETH",
         "protocol": {
             "type": "ERC20",
             "protocol_data": {
@@ -780,6 +960,23 @@ pub fn iris_testnet_conf() -> Json {
     })
 }
 
+pub fn nucleus_testnet_conf() -> Json {
+    json!({
+        "coin": "NUCLEUS-TEST",
+        "avg_blocktime": 5,
+        "derivation_path": "m/44'/566'",
+        "protocol":{
+            "type":"TENDERMINT",
+            "protocol_data": {
+                "decimals": 6,
+                "denom": "unucl",
+                "account_prefix": "nuc",
+                "chain_id": "nucleus-testnet",
+            },
+        }
+    })
+}
+
 pub fn iris_nimda_testnet_conf() -> Json {
     json!({
         "coin": "IRIS-NIMDA",
@@ -790,6 +987,20 @@ pub fn iris_nimda_testnet_conf() -> Json {
                 "platform": "IRIS-TEST",
                 "decimals": 6,
                 "denom": "nim",
+            },
+        }
+    })
+}
+
+pub fn iris_ibc_nucleus_testnet_conf() -> Json {
+    json!({
+        "coin":"IRIS-IBC-NUCLEUS-TEST",
+        "protocol":{
+            "type":"TENDERMINTTOKEN",
+            "protocol_data": {
+                "platform": "NUCLEUS-TEST",
+                "decimals": 6,
+                "denom": "ibc/F7F28FF3C09024A0225EDBBDB207E5872D2B4EF2FB874FE47B05EF9C9A7D211C",
             },
         }
     })
@@ -892,11 +1103,18 @@ pub fn mm_ctx_with_iguana(passphrase: Option<&str>) -> MmArc {
 pub fn mm_ctx_with_custom_db() -> MmArc { MmCtxBuilder::new().with_test_db_namespace().into_mm_arc() }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn mm_ctx_with_custom_db() -> MmArc {
+pub fn mm_ctx_with_custom_db() -> MmArc { mm_ctx_with_custom_db_with_conf(None) }
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn mm_ctx_with_custom_db_with_conf(conf: Option<Json>) -> MmArc {
     use db_common::sqlite::rusqlite::Connection;
     use std::sync::Arc;
 
-    let ctx = MmCtxBuilder::new().into_mm_arc();
+    let mut ctx_builder = MmCtxBuilder::new();
+    if let Some(conf) = conf {
+        ctx_builder = ctx_builder.with_conf(conf);
+    }
+    let ctx = ctx_builder.into_mm_arc();
 
     let connection = Connection::open_in_memory().unwrap();
     let _ = ctx.sqlite_connection.pin(Arc::new(Mutex::new(connection)));
@@ -1569,26 +1787,14 @@ pub fn mm_spat() -> (&'static str, MarketMakerIt, RaiiDump, RaiiDump) {
 
 /// Asks MM to enable the given currency in electrum mode
 /// fresh list of servers at https://github.com/jl777/coins/blob/master/electrums/.
-pub async fn enable_electrum(
-    mm: &MarketMakerIt,
-    coin: &str,
-    tx_history: bool,
-    urls: &[&str],
-    path_to_address: Option<StandardHDCoinAddress>,
-) -> Json {
+pub async fn enable_electrum(mm: &MarketMakerIt, coin: &str, tx_history: bool, urls: &[&str]) -> Json {
     let servers = urls.iter().map(|url| json!({ "url": url })).collect();
-    enable_electrum_json(mm, coin, tx_history, servers, path_to_address).await
+    enable_electrum_json(mm, coin, tx_history, servers).await
 }
 
 /// Asks MM to enable the given currency in electrum mode
 /// fresh list of servers at https://github.com/jl777/coins/blob/master/electrums/.
-pub async fn enable_electrum_json(
-    mm: &MarketMakerIt,
-    coin: &str,
-    tx_history: bool,
-    servers: Vec<Json>,
-    path_to_address: Option<StandardHDCoinAddress>,
-) -> Json {
+pub async fn enable_electrum_json(mm: &MarketMakerIt, coin: &str, tx_history: bool, servers: Vec<Json>) -> Json {
     let electrum = mm
         .rpc(&json!({
             "userpass": mm.userpass,
@@ -1597,7 +1803,6 @@ pub async fn enable_electrum_json(
             "servers": servers,
             "mm2": 1,
             "tx_history": tx_history,
-            "path_to_address": path_to_address.unwrap_or_default(),
         }))
         .await
         .unwrap();
@@ -1616,7 +1821,7 @@ pub async fn enable_qrc20(
     coin: &str,
     urls: &[&str],
     swap_contract_address: &str,
-    path_to_address: Option<StandardHDCoinAddress>,
+    path_to_address: Option<HDAccountAddressId>,
 ) -> Json {
     let servers: Vec<_> = urls.iter().map(|url| json!({ "url": url })).collect();
     let electrum = mm
@@ -1703,7 +1908,7 @@ pub async fn enable_native(
     mm: &MarketMakerIt,
     coin: &str,
     urls: &[&str],
-    path_to_address: Option<StandardHDCoinAddress>,
+    path_to_address: Option<HDAccountAddressId>,
 ) -> Json {
     let native = mm
         .rpc(&json!({
@@ -1712,7 +1917,7 @@ pub async fn enable_native(
             "coin": coin,
             "urls": urls,
             // Dev chain swap contract address
-            "swap_contract_address": ETH_DEV_SWAP_CONTRACT,
+            "swap_contract_address": ETH_SEPOLIA_SWAP_CONTRACT,
             "path_to_address": path_to_address.unwrap_or_default(),
             "mm2": 1,
         }))
@@ -1829,7 +2034,7 @@ pub async fn enable_bch_with_tokens(
     tokens: &[&str],
     mode: UtxoRpcMode,
     tx_history: bool,
-    path_to_address: Option<StandardHDCoinAddress>,
+    path_to_address: Option<HDAccountAddressId>,
 ) -> Json {
     let slp_requests: Vec<_> = tokens.iter().map(|ticker| json!({ "ticker": ticker })).collect();
 
@@ -2046,7 +2251,7 @@ pub fn find_metrics_in_json(
     })
 }
 
-pub async fn my_swap_status(mm: &MarketMakerIt, uuid: &str) -> Json {
+pub async fn my_swap_status(mm: &MarketMakerIt, uuid: &str) -> Result<Json, String> {
     let response = mm
         .rpc(&json!({
             "userpass": mm.userpass,
@@ -2057,8 +2262,43 @@ pub async fn my_swap_status(mm: &MarketMakerIt, uuid: &str) -> Json {
         }))
         .await
         .unwrap();
-    assert!(response.0.is_success(), "!status of {}: {}", uuid, response.1);
-    json::from_str(&response.1).unwrap()
+
+    if !response.0.is_success() {
+        return Err(format!("!status of {}: {}", uuid, response.1));
+    }
+
+    Ok(json::from_str(&response.1).unwrap())
+}
+
+pub async fn wait_for_swap_status(mm: &MarketMakerIt, uuid: &str, wait_sec: i64) {
+    let wait_until = get_utc_timestamp() + wait_sec;
+    loop {
+        if my_swap_status(mm, uuid).await.is_ok() {
+            break;
+        }
+
+        if get_utc_timestamp() > wait_until {
+            panic!("Timed out waiting for swap {} status", uuid);
+        }
+
+        Timer::sleep(1.).await;
+    }
+}
+
+pub async fn wait_for_swap_finished(mm: &MarketMakerIt, uuid: &str, wait_sec: i64) {
+    let wait_until = get_utc_timestamp() + wait_sec;
+    loop {
+        let status = my_swap_status(mm, uuid).await.unwrap();
+        if status["result"]["is_finished"].as_bool().unwrap() {
+            break;
+        }
+
+        if get_utc_timestamp() > wait_until {
+            panic!("Timed out waiting for swap {} to finish", uuid);
+        }
+
+        Timer::sleep(0.5).await;
+    }
 }
 
 pub async fn wait_for_swap_contract_negotiation(mm: &MarketMakerIt, swap: &str, expected_contract: Json, until: i64) {
@@ -2067,7 +2307,7 @@ pub async fn wait_for_swap_contract_negotiation(mm: &MarketMakerIt, swap: &str, 
             panic!("Timed out");
         }
 
-        let swap_status = my_swap_status(mm, swap).await;
+        let swap_status = my_swap_status(mm, swap).await.unwrap();
         let events = swap_status["result"]["events"].as_array().unwrap();
         if events.len() < 2 {
             Timer::sleep(1.).await;
@@ -2093,7 +2333,7 @@ pub async fn wait_for_swap_negotiation_failure(mm: &MarketMakerIt, swap: &str, u
             panic!("Timed out");
         }
 
-        let swap_status = my_swap_status(mm, swap).await;
+        let swap_status = my_swap_status(mm, swap).await.unwrap();
         let events = swap_status["result"]["events"].as_array().unwrap();
         if events.len() < 2 {
             Timer::sleep(1.).await;
@@ -2107,8 +2347,11 @@ pub async fn wait_for_swap_negotiation_failure(mm: &MarketMakerIt, swap: &str, u
 
 /// Helper function requesting my swap status and checking it's events
 pub async fn check_my_swap_status(mm: &MarketMakerIt, uuid: &str, maker_amount: BigDecimal, taker_amount: BigDecimal) {
-    let status_response = my_swap_status(mm, uuid).await;
-    let swap_type = status_response["result"]["type"].as_str().unwrap();
+    let status_response = my_swap_status(mm, uuid).await.unwrap();
+    let swap_type = match status_response["result"]["type"].as_str() {
+        Some(t) => t,
+        None => return,
+    };
 
     let success_events: Vec<String> = json::from_value(status_response["result"]["success_events"].clone()).unwrap();
     if swap_type == "Taker" {
@@ -2143,7 +2386,7 @@ pub async fn check_my_swap_status_amounts(
     maker_amount: BigDecimal,
     taker_amount: BigDecimal,
 ) {
-    let status_response = my_swap_status(mm, &uuid.to_string()).await;
+    let status_response = my_swap_status(mm, &uuid.to_string()).await.unwrap();
 
     let events_array = status_response["result"]["events"].as_array().unwrap();
     let actual_maker_amount = json::from_value(events_array[0]["event"]["data"]["maker_amount"].clone()).unwrap();
@@ -2152,35 +2395,49 @@ pub async fn check_my_swap_status_amounts(
     assert_eq!(taker_amount, actual_taker_amount);
 }
 
-pub async fn check_stats_swap_status(mm: &MarketMakerIt, uuid: &str) {
-    let response = mm
-        .rpc(&json!({
-            "method": "stats_swap_status",
-            "params": {
-                "uuid": uuid,
-            }
-        }))
-        .await
-        .unwrap();
-    assert!(response.0.is_success(), "!status of {}: {}", uuid, response.1);
-    let status_response: Json = json::from_str(&response.1).unwrap();
-    let maker_events_array = status_response["result"]["maker"]["events"].as_array().unwrap();
-    let taker_events_array = status_response["result"]["taker"]["events"].as_array().unwrap();
-    let maker_actual_events = maker_events_array
-        .iter()
-        .map(|item| item["event"]["type"].as_str().unwrap());
-    let maker_actual_events: Vec<&str> = maker_actual_events.collect();
-    let taker_actual_events = taker_events_array
-        .iter()
-        .map(|item| item["event"]["type"].as_str().unwrap());
-    let taker_actual_events: Vec<&str> = taker_actual_events.collect();
+pub async fn wait_check_stats_swap_status(mm: &MarketMakerIt, uuid: &str, timeout: i64) {
+    let wait_until = get_utc_timestamp() + timeout;
+    loop {
+        let response = mm
+            .rpc(&json!({
+                "method": "stats_swap_status",
+                "params": {
+                    "uuid": uuid,
+                }
+            }))
+            .await
+            .unwrap();
+        assert!(response.0.is_success(), "!status of {}: {}", uuid, response.1);
+        let status_response: Json = json::from_str(&response.1).unwrap();
 
-    assert_eq!(maker_actual_events.as_slice(), MAKER_SUCCESS_EVENTS);
-    assert!(
-        taker_actual_events.as_slice() == TAKER_SUCCESS_EVENTS
-            || taker_actual_events.as_slice() == TAKER_ACTUAL_EVENTS_WATCHER_SPENDS_MAKER_PAYMENT
-            || taker_actual_events.as_slice() == TAKER_ACTUAL_EVENTS_TAKER_SPENDS_MAKER_PAYMENT
-    );
+        // Perform the checks only if the maker and taker stats are available.
+        // Sometimes they are slow to propagate so we need to wait a bit.
+        if status_response["result"]["maker"].is_null() || status_response["result"]["taker"].is_null() {
+            Timer::sleep(1.).await;
+            if get_utc_timestamp() > wait_until {
+                panic!("Timed out waiting for swap stats status uuid={}", uuid);
+            }
+        } else {
+            let maker_events_array = status_response["result"]["maker"]["events"].as_array().unwrap();
+            let taker_events_array = status_response["result"]["taker"]["events"].as_array().unwrap();
+            let maker_actual_events = maker_events_array
+                .iter()
+                .map(|item| item["event"]["type"].as_str().unwrap());
+            let maker_actual_events: Vec<&str> = maker_actual_events.collect();
+            let taker_actual_events = taker_events_array
+                .iter()
+                .map(|item| item["event"]["type"].as_str().unwrap());
+            let taker_actual_events: Vec<&str> = taker_actual_events.collect();
+
+            assert_eq!(maker_actual_events.as_slice(), MAKER_SUCCESS_EVENTS);
+            assert!(
+                taker_actual_events.as_slice() == TAKER_SUCCESS_EVENTS
+                    || taker_actual_events.as_slice() == TAKER_ACTUAL_EVENTS_WATCHER_SPENDS_MAKER_PAYMENT
+                    || taker_actual_events.as_slice() == TAKER_ACTUAL_EVENTS_TAKER_SPENDS_MAKER_PAYMENT
+            );
+            return;
+        }
+    }
 }
 
 pub async fn check_recent_swaps(mm: &MarketMakerIt, expected_len: usize) {
@@ -2314,7 +2571,7 @@ pub async fn best_orders_v2_by_number(
     json::from_str(&request.1).unwrap()
 }
 
-pub async fn init_withdraw(mm: &MarketMakerIt, coin: &str, to: &str, amount: &str) -> Json {
+pub async fn init_withdraw(mm: &MarketMakerIt, coin: &str, to: &str, amount: &str, from: Option<Json>) -> Json {
     let request = mm
         .rpc(&json!({
             "userpass": mm.userpass,
@@ -2324,6 +2581,7 @@ pub async fn init_withdraw(mm: &MarketMakerIt, coin: &str, to: &str, amount: &st
                 "coin": coin,
                 "to": to,
                 "amount": amount,
+                "from": from,
             }
         }))
         .await
@@ -2342,7 +2600,7 @@ pub async fn withdraw_v1(
     coin: &str,
     to: &str,
     amount: &str,
-    from: Option<StandardHDCoinAddress>,
+    from: Option<HDAccountAddressId>,
 ) -> TransactionDetails {
     let request = mm
         .rpc(&json!({
@@ -2365,12 +2623,12 @@ pub async fn ibc_withdraw(
     coin: &str,
     to: &str,
     amount: &str,
-    from: Option<StandardHDCoinAddress>,
+    from: Option<HDAccountAddressId>,
 ) -> TransactionDetails {
     let request = mm
         .rpc(&json!({
             "userpass": mm.userpass,
-            "method": "ibc_withdraw",
+            "method": "withdraw",
             "mmrpc": "2.0",
             "params": {
                 "ibc_source_channel": source_channel,
@@ -2382,7 +2640,7 @@ pub async fn ibc_withdraw(
         }))
         .await
         .unwrap();
-    assert_eq!(request.0, StatusCode::OK, "'ibc_withdraw' failed: {}", request.1);
+    assert_eq!(request.0, StatusCode::OK, "'withdraw' failed: {}", request.1);
 
     let json: Json = json::from_str(&request.1).unwrap();
     json::from_value(json["result"].clone()).unwrap()
@@ -2663,7 +2921,7 @@ pub async fn enable_tendermint(
             "tx_history": tx_history
         }
     });
-    println!(
+    log!(
         "enable_tendermint_with_assets request {}",
         json::to_string(&request).unwrap()
     );
@@ -2675,7 +2933,7 @@ pub async fn enable_tendermint(
         "'enable_tendermint_with_assets' failed: {}",
         request.1
     );
-    println!("enable_tendermint_with_assets response {}", request.1);
+    log!("enable_tendermint_with_assets response {}", request.1);
     json::from_str(&request.1).unwrap()
 }
 
@@ -2700,7 +2958,7 @@ pub async fn enable_tendermint_without_balance(
             "get_balances": false
         }
     });
-    println!(
+    log!(
         "enable_tendermint_with_assets request {}",
         serde_json::to_string(&request).unwrap()
     );
@@ -2712,7 +2970,7 @@ pub async fn enable_tendermint_without_balance(
         "'enable_tendermint_with_assets' failed: {}",
         request.1
     );
-    println!("enable_tendermint_with_assets response {}", request.1);
+    log!("enable_tendermint_with_assets response {}", request.1);
     serde_json::from_str(&request.1).unwrap()
 }
 
@@ -2729,7 +2987,7 @@ pub async fn get_tendermint_my_tx_history(mm: &MarketMakerIt, coin: &str, limit:
             },
         }
     });
-    println!(
+    log!(
         "tendermint 'my_tx_history' request {}",
         json::to_string(&request).unwrap()
     );
@@ -2742,7 +3000,7 @@ pub async fn get_tendermint_my_tx_history(mm: &MarketMakerIt, coin: &str, limit:
         request.1
     );
 
-    println!("tendermint 'my_tx_history' response {}", request.1);
+    log!("tendermint 'my_tx_history' response {}", request.1);
     json::from_str(&request.1).unwrap()
 }
 
@@ -2756,7 +3014,7 @@ pub async fn enable_tendermint_token(mm: &MarketMakerIt, coin: &str) -> Json {
             "activation_params": {}
         }
     });
-    println!("enable_tendermint_token request {}", json::to_string(&request).unwrap());
+    log!("enable_tendermint_token request {}", json::to_string(&request).unwrap());
 
     let request = mm.rpc(&request).await.unwrap();
     assert_eq!(
@@ -2765,11 +3023,29 @@ pub async fn enable_tendermint_token(mm: &MarketMakerIt, coin: &str) -> Json {
         "'enable_tendermint_token' failed: {}",
         request.1
     );
-    println!("enable_tendermint_token response {}", request.1);
+    log!("enable_tendermint_token response {}", request.1);
     json::from_str(&request.1).unwrap()
 }
 
-pub async fn init_utxo_electrum(mm: &MarketMakerIt, coin: &str, servers: Vec<Json>) -> Json {
+pub async fn init_utxo_electrum(
+    mm: &MarketMakerIt,
+    coin: &str,
+    servers: Vec<Json>,
+    path_to_address: Option<HDAccountAddressId>,
+    priv_key_policy: Option<&str>,
+) -> Json {
+    let mut activation_params = json!({
+        "mode": {
+            "rpc": "Electrum",
+            "rpc_data": {
+                "servers": servers,
+                "path_to_address": path_to_address,
+            }
+        }
+    });
+    if let Some(priv_key_policy) = priv_key_policy {
+        activation_params["priv_key_policy"] = priv_key_policy.into();
+    }
     let request = mm
         .rpc(&json!({
             "userpass": mm.userpass,
@@ -2777,14 +3053,7 @@ pub async fn init_utxo_electrum(mm: &MarketMakerIt, coin: &str, servers: Vec<Jso
             "mmrpc": "2.0",
             "params": {
                 "ticker": coin,
-                "activation_params": {
-                    "mode": {
-                        "rpc": "Electrum",
-                        "rpc_data": {
-                            "servers": servers
-                        }
-                    }
-                },
+                "activation_params": activation_params,
             }
         }))
         .await
@@ -2817,6 +3086,119 @@ pub async fn init_utxo_status(mm: &MarketMakerIt, task_id: u64) -> Json {
         request.1
     );
     json::from_str(&request.1).unwrap()
+}
+
+pub async fn enable_utxo_v2_electrum(
+    mm: &MarketMakerIt,
+    coin: &str,
+    servers: Vec<Json>,
+    path_to_address: Option<HDAccountAddressId>,
+    timeout: u64,
+    priv_key_policy: Option<&str>,
+) -> UtxoStandardActivationResult {
+    let init = init_utxo_electrum(mm, coin, servers, path_to_address, priv_key_policy).await;
+    let init: RpcV2Response<InitTaskResult> = json::from_value(init).unwrap();
+    let timeout = wait_until_ms(timeout * 1000);
+
+    loop {
+        if now_ms() > timeout {
+            panic!("{} initialization timed out", coin);
+        }
+
+        let status = init_utxo_status(mm, init.result.task_id).await;
+        let status: RpcV2Response<InitUtxoStatus> = json::from_value(status).unwrap();
+        log!("init_utxo_status: {:?}", status);
+        match status.result {
+            InitUtxoStatus::Ok(result) => break result,
+            InitUtxoStatus::Error(e) => panic!("{} initialization error {:?}", coin, e),
+            _ => Timer::sleep(1.).await,
+        }
+    }
+}
+
+pub async fn init_eth_with_tokens(
+    mm: &MarketMakerIt,
+    platform_coin: &str,
+    tokens: &[&str],
+    swap_contract_address: &str,
+    nodes: &[&str],
+    path_to_address: Option<HDAccountAddressId>,
+) -> Json {
+    let erc20_tokens_requests: Vec<_> = tokens.iter().map(|ticker| json!({ "ticker": ticker })).collect();
+    let nodes: Vec<_> = nodes.iter().map(|url| json!({ "url": url })).collect();
+
+    let response = mm
+        .rpc(&json!({
+        "userpass": mm.userpass,
+        "method": "task::enable_eth::init",
+        "mmrpc": "2.0",
+        "params": {
+                "ticker": platform_coin,
+                "swap_contract_address": swap_contract_address,
+                "nodes": nodes,
+                "tx_history": true,
+                "erc20_tokens_requests": erc20_tokens_requests,
+                "path_to_address": path_to_address.unwrap_or_default(),
+            }
+        }))
+        .await
+        .unwrap();
+    assert_eq!(
+        response.0,
+        StatusCode::OK,
+        "'task::enable_eth::init' failed: {}",
+        response.1
+    );
+    json::from_str(&response.1).unwrap()
+}
+
+pub async fn init_eth_with_tokens_status(mm: &MarketMakerIt, task_id: u64) -> Json {
+    let request = mm
+        .rpc(&json!({
+            "userpass": mm.userpass,
+            "method": "task::enable_eth::status",
+            "mmrpc": "2.0",
+            "params": {
+                "task_id": task_id,
+            }
+        }))
+        .await
+        .unwrap();
+    assert_eq!(
+        request.0,
+        StatusCode::OK,
+        "'task::enable_eth::status' failed: {}",
+        request.1
+    );
+    json::from_str(&request.1).unwrap()
+}
+
+pub async fn enable_eth_with_tokens_v2(
+    mm: &MarketMakerIt,
+    platform_coin: &str,
+    tokens: &[&str],
+    swap_contract_address: &str,
+    nodes: &[&str],
+    timeout: u64,
+    path_to_address: Option<HDAccountAddressId>,
+) -> EthWithTokensActivationResult {
+    let init = init_eth_with_tokens(mm, platform_coin, tokens, swap_contract_address, nodes, path_to_address).await;
+    let init: RpcV2Response<InitTaskResult> = json::from_value(init).unwrap();
+    let timeout = wait_until_ms(timeout * 1000);
+
+    loop {
+        if now_ms() > timeout {
+            panic!("{} initialization timed out", platform_coin);
+        }
+
+        let status = init_eth_with_tokens_status(mm, init.result.task_id).await;
+        let status: RpcV2Response<InitEthWithTokensStatus> = json::from_value(status).unwrap();
+        match status.result {
+            InitEthWithTokensStatus::Ok(result) => break result,
+            InitEthWithTokensStatus::Error(e) => panic!("{} initialization error {:?}", platform_coin, e),
+            _ => Timer::sleep(1.).await,
+        }
+    }
 }
 
 /// Note that mm2 ignores `volume` if `max` is true.
@@ -2910,16 +3292,8 @@ pub async fn start_swaps(
 
     for uuid in uuids.iter() {
         // ensure the swaps are started
-        let expected_log = format!("Taker swap {} has successfully started", uuid);
-        taker
-            .wait_for_log(10., |log| log.contains(&expected_log))
-            .await
-            .unwrap();
-        let expected_log = format!("Maker swap {} has successfully started", uuid);
-        maker
-            .wait_for_log(10., |log| log.contains(&expected_log))
-            .await
-            .unwrap()
+        wait_for_swap_status(taker, uuid, 10).await;
+        wait_for_swap_status(maker, uuid, 10).await;
     }
 
     uuids
@@ -2933,22 +3307,8 @@ pub async fn wait_for_swaps_finish_and_check_status(
     maker_price: f64,
 ) {
     for uuid in uuids.iter() {
-        maker
-            .wait_for_log(900., |log| {
-                log.contains(&format!("[swap uuid={}] Finished", uuid.as_ref()))
-            })
-            .await
-            .unwrap();
-
-        taker
-            .wait_for_log(900., |log| {
-                log.contains(&format!("[swap uuid={}] Finished", uuid.as_ref()))
-            })
-            .await
-            .unwrap();
-
-        log!("Waiting a few second for the fresh swap status to be saved..");
-        Timer::sleep(3.33).await;
+        wait_for_swap_finished(maker, uuid.as_ref(), 900).await;
+        wait_for_swap_finished(taker, uuid.as_ref(), 900).await;
 
         log!("Checking taker status..");
         check_my_swap_status(
@@ -3093,13 +3453,144 @@ pub async fn get_locked_amount(mm: &MarketMakerIt, coin: &str) -> GetLockedAmoun
             "coin": coin
         }
     });
-    println!("get_locked_amount request {}", json::to_string(&request).unwrap());
+    log!("get_locked_amount request {}", json::to_string(&request).unwrap());
 
     let request = mm.rpc(&request).await.unwrap();
     assert_eq!(request.0, StatusCode::OK, "'get_locked_amount' failed: {}", request.1);
-    println!("get_locked_amount response {}", request.1);
+    log!("get_locked_amount response {}", request.1);
     let response: RpcV2Response<GetLockedAmountResponse> = json::from_str(&request.1).unwrap();
     response.result
+}
+
+pub async fn coins_needed_for_kickstart(mm: &MarketMakerIt) -> Vec<String> {
+    let request = json!({
+        "userpass": mm.userpass,
+        "method": "coins_needed_for_kick_start",
+        "params": []
+    });
+    let response = mm.rpc(&request).await.unwrap();
+    assert_eq!(
+        response.0,
+        StatusCode::OK,
+        "'coins_needed_for_kick_start' failed: {}",
+        response.1
+    );
+    let result: CoinsNeededForKickstartResponse = json::from_str(&response.1).unwrap();
+    result.result
+}
+
+pub async fn enable_z_coin_light(
+    mm: &MarketMakerIt,
+    coin: &str,
+    electrums: &[&str],
+    lightwalletd_urls: &[&str],
+    account: Option<u32>,
+    starting_height: Option<u64>,
+) -> ZCoinActivationResult {
+    let init = init_z_coin_light(mm, coin, electrums, lightwalletd_urls, starting_height, account).await;
+    let init: RpcV2Response<InitTaskResult> = json::from_value(init).unwrap();
+    let timeout = wait_until_sec(300);
+
+    loop {
+        if now_sec() > timeout {
+            panic!("{} initialization timed out", coin);
+        }
+        let status = init_z_coin_status(mm, init.result.task_id).await;
+        info!("Status {}", json::to_string(&status).unwrap());
+        let status: RpcV2Response<InitZcoinStatus> = json::from_value(status).unwrap();
+        match status.result {
+            InitZcoinStatus::Ok(result) => break result,
+            InitZcoinStatus::Error(e) => panic!("{} initialization error {:?}", coin, e),
+            _ => Timer::sleep(1.).await,
+        }
+    }
+}
+
+pub async fn get_new_address(
+    mm: &MarketMakerIt,
+    coin: &str,
+    account_id: u32,
+    chain: Option<Bip44Chain>,
+) -> GetNewAddressResponse {
+    let request = json!({
+        "userpass": mm.userpass,
+        "method": "get_new_address",
+        "mmrpc": "2.0",
+        "params": {
+            "coin": coin,
+            "account_id": account_id,
+            "chain": chain
+        }
+    });
+
+    let request = mm.rpc(&request).await.unwrap();
+    assert_eq!(request.0, StatusCode::OK, "'get_new_address' failed: {}", request.1);
+    let response: RpcV2Response<GetNewAddressResponse> = json::from_str(&request.1).unwrap();
+    response.result
+}
+
+pub async fn account_balance(
+    mm: &MarketMakerIt,
+    coin: &str,
+    account_index: u32,
+    chain: Bip44Chain,
+) -> HDAccountBalanceResponse {
+    let request = json!({
+        "userpass": mm.userpass,
+        "method": "account_balance",
+        "mmrpc": "2.0",
+        "params": {
+            "coin": coin,
+            "account_index": account_index,
+            "chain": chain
+        }
+    });
+
+    let request = mm.rpc(&request).await.unwrap();
+    assert_eq!(request.0, StatusCode::OK, "'account_balance' failed: {}", request.1);
+    let response: RpcV2Response<HDAccountBalanceResponse> = json::from_str(&request.1).unwrap();
+    response.result
+}
+
+pub async fn init_create_new_account(mm: &MarketMakerIt, coin: &str, account_id: Option<u32>) -> Json {
+    let request = json!({
+        "userpass": mm.userpass,
+        "method": "task::create_new_account::init",
+        "mmrpc": "2.0",
+        "params": {
+            "coin": coin,
+            "account_id": account_id
+        }
+    });
+
+    let request = mm.rpc(&request).await.unwrap();
+    assert_eq!(
+        request.0,
+        StatusCode::OK,
+        "'task::create_new_account::init' failed: {}",
+        request.1
+    );
+    json::from_str(&request.1).unwrap()
+}
+
+pub async fn create_new_account_status(mm: &MarketMakerIt, task_id: u64) -> Json {
+    let request = json!({
+        "userpass": mm.userpass,
+        "method": "task::create_new_account::status",
+        "mmrpc": "2.0",
+        "params": {
+            "task_id": task_id,
+        }
+    });
+
+    let request = mm.rpc(&request).await.unwrap();
+    assert_eq!(
+        request.0,
+        StatusCode::OK,
+        "'task::create_new_account::status' failed: {}",
+        request.1
+    );
+    json::from_str(&request.1).unwrap()
 }
 
 #[test]
@@ -3126,4 +3617,105 @@ fn test_parse_env_file() {
             None
         )
     );
+}
+
+/// test helper to call sign_raw_transaction rpc with utxo coin param
+pub async fn test_sign_raw_transaction_rpc_helper(
+    mm: &MarketMakerIt,
+    expected_ret: StatusCode,
+    json_params: &Json,
+) -> Json {
+    let response = mm
+        .rpc(&json!({
+            "userpass": mm.userpass,
+            "method":"sign_raw_transaction",
+            "mmrpc":"2.0",
+            "id": 0,
+            "params": json_params
+        }))
+        .await
+        .expect("sign_raw_transaction rpc result okay");
+    assert_eq!(
+        response.0, expected_ret,
+        "'sign_raw_transaction' unexpected return code: {}",
+        response.1
+    );
+    json::from_str(&response.1).expect("response to json conversion must be okay")
+}
+
+/// Helper to call init trezor rpc
+pub async fn init_trezor_rpc(mm: &MarketMakerIt, coin: &str) -> Json {
+    let request = mm
+        .rpc(&json!({
+            "userpass": mm.userpass,
+            "method": "task::init_trezor::init",
+            "mmrpc": "2.0",
+            "params": {
+                "ticker": coin,
+            }
+        }))
+        .await
+        .unwrap();
+    assert_eq!(
+        request.0,
+        StatusCode::OK,
+        "'task::init_trezor::init' failed: {}",
+        request.1
+    );
+    json::from_str(&request.1).unwrap()
+}
+
+/// Helper to call init trezor status
+pub async fn init_trezor_status_rpc(mm: &MarketMakerIt, task_id: u64) -> Json {
+    let request = mm
+        .rpc(&json!({
+            "userpass": mm.userpass,
+            "method": "task::init_trezor::status",
+            "mmrpc": "2.0",
+            "params": {
+                "task_id": task_id,
+            }
+        }))
+        .await
+        .unwrap();
+    assert_eq!(
+        request.0,
+        StatusCode::OK,
+        "'task::init_trezor::status' failed: {}",
+        request.1
+    );
+    json::from_str(&request.1).unwrap()
+}
+
+pub async fn init_trezor_user_action_rpc(mm: &MarketMakerIt, task_id: u64, user_action: Json) -> Json {
+    let request = mm
+        .rpc(&json!({
+            "userpass": mm.userpass,
+            "method": "task::init_trezor::user_action",
+            "mmrpc": "2.0",
+            "params": {
+                "task_id": task_id,
+                "user_action": user_action
+            }
+        }))
+        .await
+        .unwrap();
+    assert_eq!(
+        request.0,
+        StatusCode::OK,
+        "'task::init_trezor::user_action' failed: {}",
+        request.1
+    );
+    json::from_str(&request.1).unwrap()
+}
+
+pub async fn active_swaps(mm: &MarketMakerIt) -> ActiveSwapsResponse {
+    let request = json!({
+        "userpass": mm.userpass,
+        "method": "active_swaps",
+        "params": []
+    });
+    let response = mm.rpc(&request).await.unwrap();
+    assert_eq!(response.0, StatusCode::OK, "'active_swaps' failed: {}", response.1);
+    json::from_str(&response.1).unwrap()
 }

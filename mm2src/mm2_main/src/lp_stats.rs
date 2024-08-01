@@ -188,16 +188,13 @@ pub fn process_info_request(ctx: MmArc, request: NetworkInfoRequest) -> Result<O
     }
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Default)]
 enum StatsCollectionStatus {
     Running,
     Updating(f64),
     Stopping,
+    #[default]
     Stopped,
-}
-
-impl Default for StatsCollectionStatus {
-    fn default() -> Self { StatsCollectionStatus::Stopped }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), derive(Default))]
@@ -254,8 +251,7 @@ pub async fn start_version_stat_collection(ctx: MmArc, req: Json) -> NodeVersion
         let relay_addr = RelayAddress::from_str(&address)?;
         let multi_address = relay_addr.try_to_multiaddr(network_info)?;
 
-        let mut addresses = HashSet::new();
-        addresses.insert(multi_address);
+        let addresses = HashSet::from([multi_address]);
         add_reserved_peer_addresses(&ctx, peer_id, addresses);
     }
 

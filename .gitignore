@@ -32,6 +32,9 @@ scripts/mm2/seed/unparsed.txt
 /js/mm2
 /js/mm2.exe
 /js/.mm2.*
+/js/kdf
+/js/kdf.exe
+/js/.kdf.*
 
 # Rust artefacts
 /MM_DATETIME
@@ -39,6 +42,8 @@ scripts/mm2/seed/unparsed.txt
 /MM_VERSION
 /MM_VERSION.tmp
 /target
+/targettest
+/clippytarget
 
 # Subcrate artefacts
 /mm2src/*/target
@@ -49,6 +54,7 @@ scripts/mm2/seed/unparsed.txt
 /.vscode/settings.json
 /.vscode/tasks.json
 /.vscode/c_cpp_properties.json
+/.vscode/launch.json
 
 # IDE artefacts
 /.vscode/ipch
@@ -68,3 +74,9 @@ MM2.json
 
 # mergetool
 *.orig
+
+# Ignore containers runtime directories for dockerized tests
+# This directory contains temporary data used by Docker containers during tests execution.
+# It is recreated from container-state data each time test containers are started,
+# and should not be tracked in version control.
+.docker/container-runtime/
