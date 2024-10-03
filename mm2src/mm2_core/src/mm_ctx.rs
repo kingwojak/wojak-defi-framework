@@ -1,9 +1,12 @@
 #[cfg(feature = "track-ctx-pointer")]
 use common::executor::Timer;
-use common::executor::{abortable_queue::{AbortableQueue, WeakSpawner},
-                       graceful_shutdown, AbortSettings, AbortableSystem, SpawnAbortable, SpawnFuture};
 use common::log::{self, LogLevel, LogOnError, LogState};
 use common::{cfg_native, cfg_wasm32, small_rng};
+use common::{executor::{abortable_queue::{AbortableQueue, WeakSpawner},
+                        graceful_shutdown, AbortSettings, AbortableSystem, SpawnAbortable, SpawnFuture},
+             expirable_map::ExpirableMap};
+use futures::channel::oneshot;
+use futures::lock::Mutex as AsyncMutex;
 use gstuff::{try_s, Constructible, ERR, ERRL};
 use lazy_static::lazy_static;
 use mm2_event_stream::{controller::Controller, Event, EventStreamConfiguration};
@@ -30,7 +33,6 @@ cfg_wasm32! {
 cfg_native! {
     use db_common::async_sql_conn::AsyncConnection;
     use db_common::sqlite::rusqlite::Connection;
-    use futures::lock::Mutex as AsyncMutex;
     use rustls::ServerName;
     use mm2_metrics::prometheus;
     use mm2_metrics::MmMetricsError;
@@ -142,6 +144,8 @@ pub struct MmCtx {
     /// asynchronous handle for rusqlite connection.
     #[cfg(not(target_arch = "wasm32"))]
     pub async_sqlite_connection: Constructible<Arc<AsyncMutex<AsyncConnection>>>,
+    /// Links the RPC context to the P2P context to handle health check responses.
+    pub healthcheck_response_handler: AsyncMutex<ExpirableMap<String, oneshot::Sender<()>>>,
 }
 
 impl MmCtx {
@@ -191,6 +195,7 @@ impl MmCtx {
             nft_ctx: Mutex::new(None),
             #[cfg(not(target_arch = "wasm32"))]
             async_sqlite_connection: Constructible::default(),
+            healthcheck_response_handler: AsyncMutex::new(ExpirableMap::default()),
         }
     }
 
