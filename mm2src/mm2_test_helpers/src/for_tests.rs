@@ -81,7 +81,7 @@ pub const MAKER_ERROR_EVENTS: [&str; 15] = [
     "MakerPaymentRefundFinished",
 ];
 
-pub const TAKER_SUCCESS_EVENTS: [&str; 11] = [
+pub const TAKER_SUCCESS_EVENTS: [&str; 12] = [
     "Started",
     "Negotiated",
     "TakerFeeSent",
@@ -92,10 +92,11 @@ pub const TAKER_SUCCESS_EVENTS: [&str; 11] = [
     "TakerPaymentSent",
     "TakerPaymentSpent",
     "MakerPaymentSpent",
+    "MakerPaymentSpendConfirmed",
     "Finished",
 ];
 
-pub const TAKER_USING_WATCHERS_SUCCESS_EVENTS: [&str; 13] = [
+pub const TAKER_USING_WATCHERS_SUCCESS_EVENTS: [&str; 14] = [
     "Started",
     "Negotiated",
     "TakerFeeSent",
@@ -108,11 +109,12 @@ pub const TAKER_USING_WATCHERS_SUCCESS_EVENTS: [&str; 13] = [
     "TakerPaymentSpent",
     "MakerPaymentSpent",
     "MakerPaymentSpentByWatcher",
+    "MakerPaymentSpendConfirmed",
     "Finished",
 ];
 
 // Taker using watchers and watcher spends maker payment
-pub const TAKER_ACTUAL_EVENTS_WATCHER_SPENDS_MAKER_PAYMENT: [&str; 12] = [
+pub const TAKER_ACTUAL_EVENTS_WATCHER_SPENDS_MAKER_PAYMENT: [&str; 13] = [
     "Started",
     "Negotiated",
     "TakerFeeSent",
@@ -124,11 +126,12 @@ pub const TAKER_ACTUAL_EVENTS_WATCHER_SPENDS_MAKER_PAYMENT: [&str; 12] = [
     "WatcherMessageSent",
     "TakerPaymentSpent",
     "MakerPaymentSpentByWatcher",
+    "MakerPaymentSpendConfirmed",
     "Finished",
 ];
 
 // Taker using watchers and spends maker payment instead of watcher
-pub const TAKER_ACTUAL_EVENTS_TAKER_SPENDS_MAKER_PAYMENT: [&str; 12] = [
+pub const TAKER_ACTUAL_EVENTS_TAKER_SPENDS_MAKER_PAYMENT: [&str; 13] = [
     "Started",
     "Negotiated",
     "TakerFeeSent",
@@ -140,10 +143,11 @@ pub const TAKER_ACTUAL_EVENTS_TAKER_SPENDS_MAKER_PAYMENT: [&str; 12] = [
     "WatcherMessageSent",
     "TakerPaymentSpent",
     "MakerPaymentSpent",
+    "MakerPaymentSpendConfirmed",
     "Finished",
 ];
 
-pub const TAKER_ERROR_EVENTS: [&str; 16] = [
+pub const TAKER_ERROR_EVENTS: [&str; 17] = [
     "StartFailed",
     "NegotiateFailed",
     "TakerFeeSendFailed",
@@ -154,6 +158,7 @@ pub const TAKER_ERROR_EVENTS: [&str; 16] = [
     "TakerPaymentDataSendFailed",
     "TakerPaymentWaitForSpendFailed",
     "MakerPaymentSpendFailed",
+    "MakerPaymentSpendConfirmFailed",
     "TakerPaymentWaitRefundStarted",
     "TakerPaymentRefundStarted",
     "TakerPaymentRefunded",
