@@ -9,12 +9,11 @@ use instant::{Duration, Instant};
 use lazy_static::lazy_static;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::MmError;
-use mm2_libp2p::{decode_message, encode_message, pub_sub_topic, Libp2pPublic, TopicPrefix};
+use mm2_libp2p::{decode_message, encode_message, pub_sub_topic, Libp2pPublic, PeerAddress, TopicPrefix};
 use mm2_net::p2p::P2PContext;
 use ser_error_derive::SerializeErrorType;
 use serde::{Deserialize, Serialize};
 use std::convert::TryFrom;
-use std::str::FromStr;
 use std::sync::Mutex;
 
 use crate::lp_network::broadcast_p2p_msg;
@@ -35,71 +34,6 @@ pub(crate) struct HealthcheckMessage {
     #[serde(deserialize_with = "deserialize_bytes")]
     signature: Vec<u8>,
     data: HealthcheckData,
-}
-
-/// Wrapper of `libp2p::PeerId` with trait additional implementations.
-///
-/// TODO: This should be used as a replacement of `libp2p::PeerId` in the entire project.
-#[derive(Clone, Copy, Debug, Display, PartialEq)]
-pub struct PeerAddress(mm2_libp2p::PeerId);
-
-impl From<mm2_libp2p::PeerId> for PeerAddress {
-    fn from(value: mm2_libp2p::PeerId) -> Self { Self(value) }
-}
-
-impl From<PeerAddress> for mm2_libp2p::PeerId {
-    fn from(value: PeerAddress) -> Self { value.0 }
-}
-
-impl Serialize for PeerAddress {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.0.to_string())
-    }
-}
-
-impl<'de> Deserialize<'de> for PeerAddress {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct PeerAddressVisitor;
-
-        impl<'de> serde::de::Visitor<'de> for PeerAddressVisitor {
-            type Value = PeerAddress;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("a string representation of peer id.")
-            }
-
-            fn visit_str<E>(self, value: &str) -> Result<PeerAddress, E>
-            where
-                E: serde::de::Error,
-            {
-                if value.len() > 100 {
-                    return Err(serde::de::Error::invalid_length(
-                        value.len(),
-                        &"peer id cannot exceed 100 characters.",
-                    ));
-                }
-
-                Ok(mm2_libp2p::PeerId::from_str(value)
-                    .map_err(serde::de::Error::custom)?
-                    .into())
-            }
-
-            fn visit_string<E>(self, value: String) -> Result<PeerAddress, E>
-            where
-                E: serde::de::Error,
-            {
-                self.visit_str(&value)
-            }
-        }
-
-        deserializer.deserialize_str(PeerAddressVisitor)
-    }
 }
 
 #[derive(Debug, Display)]
@@ -331,8 +265,7 @@ pub async fn peer_connection_healthcheck_rpc(
 
     {
         let mut book = ctx.healthcheck_response_handler.lock().await;
-        book.clear_expired_entries();
-        book.insert(target_peer_address.to_string(), tx, address_record_exp);
+        book.insert(target_peer_address, tx, address_record_exp);
     }
 
     broadcast_p2p_msg(
@@ -395,7 +328,7 @@ pub(crate) async fn process_p2p_healthcheck_message(ctx: &MmArc, message: mm2_li
         } else {
             // The requested peer is healthy; signal the response channel.
             let mut response_handler = ctx.healthcheck_response_handler.lock().await;
-            if let Some(tx) = response_handler.remove(&sender_peer.to_string()) {
+            if let Some(tx) = response_handler.remove(&sender_peer) {
                 if tx.send(()).is_err() {
                     log::error!("Result channel isn't present for peer '{sender_peer}'.");
                 };
@@ -409,6 +342,7 @@ pub(crate) async fn process_p2p_healthcheck_message(ctx: &MmArc, message: mm2_li
 #[cfg(any(test, target_arch = "wasm32"))]
 mod tests {
     use std::mem::discriminant;
+    use std::str::FromStr;
 
     use super::*;
     use common::cross_test;
