@@ -2028,7 +2028,13 @@ pub trait MarketCoinOps {
 
     fn wait_for_confirmations(&self, input: ConfirmPaymentInput) -> Box<dyn Future<Item = (), Error = String> + Send>;
 
-    fn wait_for_htlc_tx_spend(&self, args: WaitForHTLCTxSpendArgs<'_>) -> TransactionFut;
+    /// Waits for spending/unlocking of funds locked in a HTLC construction specific to the coin's
+    /// chain. Implementation should monitor locked funds (UTXO/contract/etc.) until funds are
+    /// spent/unlocked or timeout is reached.
+    ///
+    /// Returns spending tx/event from mempool/pending state to allow prompt extraction of preimage
+    /// secret.
+    async fn wait_for_htlc_tx_spend(&self, args: WaitForHTLCTxSpendArgs<'_>) -> TransactionResult;
 
     fn tx_enum_from_bytes(&self, bytes: &[u8]) -> Result<TransactionEnum, MmError<TxMarshalingErr>>;
 

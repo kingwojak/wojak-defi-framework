@@ -2569,18 +2569,18 @@ impl MarketCoinOps for EthCoin {
         Box::new(fut.boxed().compat())
     }
 
-    fn wait_for_htlc_tx_spend(&self, args: WaitForHTLCTxSpendArgs<'_>) -> TransactionFut {
-        let unverified: UnverifiedTransactionWrapper = try_tx_fus!(rlp::decode(args.tx_bytes));
-        let tx = try_tx_fus!(SignedEthTx::new(unverified));
+    async fn wait_for_htlc_tx_spend(&self, args: WaitForHTLCTxSpendArgs<'_>) -> TransactionResult {
+        let unverified: UnverifiedTransactionWrapper = try_tx_s!(rlp::decode(args.tx_bytes));
+        let tx = try_tx_s!(SignedEthTx::new(unverified));
 
         let swap_contract_address = match args.swap_contract_address {
-            Some(addr) => try_tx_fus!(addr.try_to_address()),
+            Some(addr) => try_tx_s!(addr.try_to_address()),
             None => match tx.unsigned().action() {
                 Call(address) => *address,
                 Create => {
-                    return Box::new(futures01::future::err(TransactionErr::Plain(ERRL!(
+                    return Err(TransactionErr::Plain(ERRL!(
                         "Invalid payment action: the payment action cannot be create"
-                    ))))
+                    )))
                 },
             },
         };
@@ -2589,85 +2589,79 @@ impl MarketCoinOps for EthCoin {
             EthCoinType::Eth => get_function_name("ethPayment", args.watcher_reward),
             EthCoinType::Erc20 { .. } => get_function_name("erc20Payment", args.watcher_reward),
             EthCoinType::Nft { .. } => {
-                return Box::new(futures01::future::err(TransactionErr::ProtocolNotSupported(ERRL!(
+                return Err(TransactionErr::ProtocolNotSupported(ERRL!(
                     "Nft Protocol is not supported yet!"
-                ))))
+                )))
             },
         };
 
-        let payment_func = try_tx_fus!(SWAP_CONTRACT.function(&func_name));
-        let decoded = try_tx_fus!(decode_contract_call(payment_func, tx.unsigned().data()));
+        let payment_func = try_tx_s!(SWAP_CONTRACT.function(&func_name));
+        let decoded = try_tx_s!(decode_contract_call(payment_func, tx.unsigned().data()));
         let id = match decoded.first() {
             Some(Token::FixedBytes(bytes)) => bytes.clone(),
             invalid_token => {
-                return Box::new(futures01::future::err(TransactionErr::Plain(ERRL!(
+                return Err(TransactionErr::Plain(ERRL!(
                     "Expected Token::FixedBytes, got {:?}",
                     invalid_token
-                ))))
+                )))
             },
         };
-        let selfi = self.clone();
-        let from_block = args.from_block;
-        let wait_until = args.wait_until;
-        let check_every = args.check_every;
-        let fut = async move {
-            loop {
-                if now_sec() > wait_until {
-                    return TX_PLAIN_ERR!(
-                        "Waited too long until {} for transaction {:?} to be spent ",
-                        wait_until,
-                        tx,
-                    );
-                }
 
-                let current_block = match selfi.current_block().compat().await {
-                    Ok(b) => b,
-                    Err(e) => {
-                        error!("Error getting block number: {}", e);
-                        Timer::sleep(5.).await;
-                        continue;
-                    },
-                };
-
-                let events = match selfi
-                    .spend_events(swap_contract_address, from_block, current_block)
-                    .compat()
-                    .await
-                {
-                    Ok(ev) => ev,
-                    Err(e) => {
-                        error!("Error getting spend events: {}", e);
-                        Timer::sleep(5.).await;
-                        continue;
-                    },
-                };
-
-                let found = events.iter().find(|event| &event.data.0[..32] == id.as_slice());
-
-                if let Some(event) = found {
-                    if let Some(tx_hash) = event.transaction_hash {
-                        let transaction = match selfi.transaction(TransactionId::Hash(tx_hash)).await {
-                            Ok(Some(t)) => t,
-                            Ok(None) => {
-                                info!("Tx {} not found yet", tx_hash);
-                                Timer::sleep(check_every).await;
-                                continue;
-                            },
-                            Err(e) => {
-                                error!("Get tx {} error: {}", tx_hash, e);
-                                Timer::sleep(check_every).await;
-                                continue;
-                            },
-                        };
-
-                        return Ok(TransactionEnum::from(try_tx_s!(signed_tx_from_web3_tx(transaction))));
-                    }
-                }
-
-                Timer::sleep(5.).await;
+        loop {
+            if now_sec() > args.wait_until {
+                return TX_PLAIN_ERR!(
+                    "Waited too long until {} for transaction {:?} to be spent ",
+                    args.wait_until,
+                    tx,
+                );
             }
-        };
-        Box::new(fut.boxed().compat())
+
+            let current_block = match self.current_block().compat().await {
+                Ok(b) => b,
+                Err(e) => {
+                    error!("Error getting block number: {}", e);
+                    Timer::sleep(5.).await;
+                    continue;
+                },
+            };
+
+            let events = match self
+                .spend_events(swap_contract_address, args.from_block, current_block)
+                .compat()
+                .await
+            {
+                Ok(ev) => ev,
+                Err(e) => {
+                    error!("Error getting spend events: {}", e);
+                    Timer::sleep(5.).await;
+                    continue;
+                },
+            };
+
+            let found = events.iter().find(|event| &event.data.0[..32] == id.as_slice());
+
+            if let Some(event) = found {
+                if let Some(tx_hash) = event.transaction_hash {
+                    let transaction = match self.transaction(TransactionId::Hash(tx_hash)).await {
+                        Ok(Some(t)) => t,
+                        Ok(None) => {
+                            info!("Tx {} not found yet", tx_hash);
+                            Timer::sleep(args.check_every).await;
+                            continue;
+                        },
+                        Err(e) => {
+                            error!("Get tx {} error: {}", tx_hash, e);
+                            Timer::sleep(args.check_every).await;
+                            continue;
+                        },
+                    };
+
+                    return Ok(TransactionEnum::from(try_tx_s!(signed_tx_from_web3_tx(transaction))));
+                }
+            }
+
+            Timer::sleep(5.).await;
+        }
     }
 
     fn tx_enum_from_bytes(&self, bytes: &[u8]) -> Result<TransactionEnum, MmError<TxMarshalingErr>> {

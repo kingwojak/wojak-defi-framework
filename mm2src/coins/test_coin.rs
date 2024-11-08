@@ -92,7 +92,7 @@ impl MarketCoinOps for TestCoin {
         unimplemented!()
     }
 
-    fn wait_for_htlc_tx_spend(&self, args: WaitForHTLCTxSpendArgs<'_>) -> TransactionFut { unimplemented!() }
+    async fn wait_for_htlc_tx_spend(&self, args: WaitForHTLCTxSpendArgs<'_>) -> TransactionResult { unimplemented!() }
 
     fn tx_enum_from_bytes(&self, _bytes: &[u8]) -> Result<TransactionEnum, MmError<TxMarshalingErr>> {
         MmError::err(TxMarshalingErr::NotSupported(
