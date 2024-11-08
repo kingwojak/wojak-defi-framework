@@ -37,7 +37,7 @@ use crate::{CanRefundHtlc, CheckIfMyPaymentSentArgs, CoinBalance, CoinBalanceMap
             ValidateMakerPaymentArgs, ValidateOtherPubKeyErr, ValidatePaymentError, ValidatePaymentFut,
             ValidatePaymentInput, ValidateSwapV2TxResult, ValidateTakerFundingArgs,
             ValidateTakerFundingSpendPreimageResult, ValidateTakerPaymentSpendPreimageResult,
-            ValidateWatcherSpendInput, VerificationResult, WaitForHTLCTxSpendArgs, WaitForTakerPaymentSpendError,
+            ValidateWatcherSpendInput, VerificationResult, WaitForHTLCTxSpendArgs, WaitForPaymentSpendError,
             WatcherOps, WatcherReward, WatcherRewardError, WatcherSearchForSwapTxSpendInput,
             WatcherValidatePaymentInput, WatcherValidateTakerFeeInput, WithdrawFut};
 use common::executor::{AbortableSystem, AbortedError};
@@ -871,7 +871,7 @@ impl TakerCoinSwapOpsV2 for UtxoStandardCoin {
         taker_payment: &Self::Tx,
         from_block: u64,
         wait_until: u64,
-    ) -> MmResult<Self::Tx, WaitForTakerPaymentSpendError> {
+    ) -> MmResult<Self::Tx, WaitForPaymentSpendError> {
         let res = utxo_common::wait_for_output_spend_impl(
             self.as_ref(),
             taker_payment,
