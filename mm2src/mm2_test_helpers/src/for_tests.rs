@@ -81,7 +81,7 @@ pub const MAKER_ERROR_EVENTS: [&str; 15] = [
     "MakerPaymentRefundFinished",
 ];
 
-pub const TAKER_SUCCESS_EVENTS: [&str; 11] = [
+pub const TAKER_SUCCESS_EVENTS: [&str; 12] = [
     "Started",
     "Negotiated",
     "TakerFeeSent",
@@ -92,10 +92,11 @@ pub const TAKER_SUCCESS_EVENTS: [&str; 11] = [
     "TakerPaymentSent",
     "TakerPaymentSpent",
     "MakerPaymentSpent",
+    "MakerPaymentSpendConfirmed",
     "Finished",
 ];
 
-pub const TAKER_USING_WATCHERS_SUCCESS_EVENTS: [&str; 13] = [
+pub const TAKER_USING_WATCHERS_SUCCESS_EVENTS: [&str; 14] = [
     "Started",
     "Negotiated",
     "TakerFeeSent",
@@ -108,11 +109,12 @@ pub const TAKER_USING_WATCHERS_SUCCESS_EVENTS: [&str; 13] = [
     "TakerPaymentSpent",
     "MakerPaymentSpent",
     "MakerPaymentSpentByWatcher",
+    "MakerPaymentSpendConfirmed",
     "Finished",
 ];
 
 // Taker using watchers and watcher spends maker payment
-pub const TAKER_ACTUAL_EVENTS_WATCHER_SPENDS_MAKER_PAYMENT: [&str; 12] = [
+pub const TAKER_ACTUAL_EVENTS_WATCHER_SPENDS_MAKER_PAYMENT: [&str; 13] = [
     "Started",
     "Negotiated",
     "TakerFeeSent",
@@ -124,11 +126,12 @@ pub const TAKER_ACTUAL_EVENTS_WATCHER_SPENDS_MAKER_PAYMENT: [&str; 12] = [
     "WatcherMessageSent",
     "TakerPaymentSpent",
     "MakerPaymentSpentByWatcher",
+    "MakerPaymentSpendConfirmed",
     "Finished",
 ];
 
 // Taker using watchers and spends maker payment instead of watcher
-pub const TAKER_ACTUAL_EVENTS_TAKER_SPENDS_MAKER_PAYMENT: [&str; 12] = [
+pub const TAKER_ACTUAL_EVENTS_TAKER_SPENDS_MAKER_PAYMENT: [&str; 13] = [
     "Started",
     "Negotiated",
     "TakerFeeSent",
@@ -140,10 +143,11 @@ pub const TAKER_ACTUAL_EVENTS_TAKER_SPENDS_MAKER_PAYMENT: [&str; 12] = [
     "WatcherMessageSent",
     "TakerPaymentSpent",
     "MakerPaymentSpent",
+    "MakerPaymentSpendConfirmed",
     "Finished",
 ];
 
-pub const TAKER_ERROR_EVENTS: [&str; 16] = [
+pub const TAKER_ERROR_EVENTS: [&str; 17] = [
     "StartFailed",
     "NegotiateFailed",
     "TakerFeeSendFailed",
@@ -154,6 +158,7 @@ pub const TAKER_ERROR_EVENTS: [&str; 16] = [
     "TakerPaymentDataSendFailed",
     "TakerPaymentWaitForSpendFailed",
     "MakerPaymentSpendFailed",
+    "MakerPaymentSpendConfirmFailed",
     "TakerPaymentWaitRefundStarted",
     "TakerPaymentRefundStarted",
     "TakerPaymentRefunded",
@@ -236,7 +241,7 @@ pub const ETH_MAINNET_NODE: &str = "https://mainnet.infura.io/v3/c01c1b4cf666425
 pub const ETH_MAINNET_CHAIN_ID: u64 = 1;
 pub const ETH_MAINNET_SWAP_CONTRACT: &str = "0x24abe4c71fc658c91313b6552cd40cd808b3ea80";
 
-pub const ETH_SEPOLIA_NODES: &[&str] = &["https://rpc2.sepolia.org"];
+pub const ETH_SEPOLIA_NODES: &[&str] = &["https://ethereum-sepolia-rpc.publicnode.com","https://rpc2.sepolia.org","https://1rpc.io/sepolia"];
 pub const ETH_SEPOLIA_CHAIN_ID: u64 = 11155111;
 pub const ETH_SEPOLIA_SWAP_CONTRACT: &str = "0xeA6D65434A15377081495a9E7C5893543E7c32cB";
 pub const ETH_SEPOLIA_TOKEN_CONTRACT: &str = "0x09d0d71FBC00D7CCF9CFf132f5E6825C88293F19";
@@ -305,6 +310,21 @@ impl Mm2TestConf {
                 "i_am_seed": true,
                 "enable_hd": true,
                 "use_trading_proto_v2": true,
+            }),
+            rpc_password: DEFAULT_RPC_PASSWORD.into(),
+        }
+    }
+
+    pub fn seednode_with_wallet_name(coins: &Json, wallet_name: &str, wallet_password: &str) -> Self {
+        Mm2TestConf {
+            conf: json!({
+                "gui": "nogui",
+                "netid": 9998,
+                "coins": coins,
+                "rpc_password": DEFAULT_RPC_PASSWORD,
+                "i_am_seed": true,
+                "wallet_name": wallet_name,
+                "wallet_password": wallet_password,
             }),
             rpc_password: DEFAULT_RPC_PASSWORD.into(),
         }
@@ -828,6 +848,13 @@ pub fn erc20_dev_conf(contract_address: &str) -> Json {
     })
 }
 
+/// ERC20 token configuration used for dockerized tests on Sepolia
+pub fn sepolia_erc20_dev_conf(contract_address: &str) -> Json {
+    let mut conf = erc20_dev_conf(contract_address);
+    set_chain_id(&mut conf, ETH_SEPOLIA_CHAIN_ID);
+    conf
+}
+
 /// global NFT configuration used for dockerized Geth dev node
 pub fn nft_dev_conf() -> Json {
     json!({
@@ -846,29 +873,14 @@ pub fn nft_dev_conf() -> Json {
     })
 }
 
-/// global NFT configuration used for Sepolia testnet
-pub fn nft_sepolia_conf() -> Json {
-    json!({
-        "coin": "NFT_ETH",
-        "name": "nftdev",
-        "chain_id": 11155111,
-        "mm2": 1,
-        "derivation_path": "m/44'/60'",
-        "protocol": {
-            "type": "NFT",
-            "protocol_data": {
-                "platform": "ETH"
-            }
-        }
-    })
-}
+fn set_chain_id(conf: &mut Json, chain_id: u64) { conf["chain_id"] = json!(chain_id); }
 
 pub fn eth_sepolia_conf() -> Json {
     json!({
         "coin": "ETH",
         "name": "ethereum",
         "derivation_path": "m/44'/60'",
-        "chain_id": 11155111,
+        "chain_id": ETH_SEPOLIA_CHAIN_ID,
         "protocol": {
             "type": "ETH"
         },
@@ -882,7 +894,7 @@ pub fn eth_sepolia_trezor_firmware_compat_conf() -> Json {
         "coin": "tETH",
         "name": "ethereum",
         "derivation_path": "m/44'/1'", // Note: trezor uses coin type 1' for eth for testnet (SLIP44_TESTNET)
-        "chain_id": 11155111,
+        "chain_id": ETH_SEPOLIA_CHAIN_ID,
         "protocol": {
             "type": "ETH"
         },
@@ -912,12 +924,12 @@ pub fn jst_sepolia_conf() -> Json {
     json!({
         "coin": "JST",
         "name": "jst",
-        "chain_id": 11155111,
+        "chain_id": ETH_SEPOLIA_CHAIN_ID,
         "protocol": {
             "type": "ERC20",
             "protocol_data": {
                 "platform": "ETH",
-                "chain_id": 11155111,
+                "chain_id": ETH_SEPOLIA_CHAIN_ID,
                 "contract_address": ETH_SEPOLIA_TOKEN_CONTRACT
             }
         },
@@ -929,14 +941,14 @@ pub fn jst_sepolia_trezor_conf() -> Json {
     json!({
         "coin": "tJST",
         "name": "tjst",
-        "chain_id": 11155111,
+        "chain_id": ETH_SEPOLIA_CHAIN_ID,
         "derivation_path": "m/44'/1'", // Note: Trezor uses 1' coin type for all testnets
         "trezor_coin": "tETH",
         "protocol": {
             "type": "ERC20",
             "protocol_data": {
                 "platform": "ETH",
-                "chain_id": 11155111,
+                "chain_id": ETH_SEPOLIA_CHAIN_ID,
                 "contract_address": ETH_SEPOLIA_TOKEN_CONTRACT
             }
         }
@@ -1357,17 +1369,49 @@ impl MarketMakerIt {
     /// Start a new MarketMaker locally.
     ///
     /// * `conf` - The command-line configuration passed to the MarketMaker.
-    ///            Unique P2P in-memory port is injected as `p2p_in_memory_port` unless this field is already present.
-    /// * `userpass` - RPC API key. We should probably extract it automatically from the MM log.
-    /// * `local` - Function to start the MarketMaker locally. Required for nodes running in a browser.
-    /// * `envs` - The enviroment variables passed to the process.
-    ///            The argument is ignore for nodes running in a browser.
+    /// * `userpass` - RPC API key.
+    /// * `local` - Function to start the MarketMaker locally.
+    /// * `envs` - The environment variables passed to the process.
+    ///            The argument is ignored for nodes running in a browser.
     #[cfg(target_arch = "wasm32")]
     pub async fn start_with_envs(
-        mut conf: Json,
+        conf: Json,
         userpass: String,
         local: Option<LocalStart>,
         _envs: &[(&str, &str)],
+    ) -> Result<MarketMakerIt, String> {
+        MarketMakerIt::start_market_maker(conf, userpass, local, None).await
+    }
+
+    /// Start a new MarketMaker locally with a specific database namespace.
+    ///
+    /// * `conf` - The command-line configuration passed to the MarketMaker.
+    /// * `userpass` - RPC API key.
+    /// * `local` - Function to start the MarketMaker locally.
+    /// * `db_namespace_id` - The test database namespace identifier.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn start_with_db(
+        conf: Json,
+        userpass: String,
+        local: Option<LocalStart>,
+        db_namespace_id: u64,
+    ) -> Result<MarketMakerIt, String> {
+        MarketMakerIt::start_market_maker(conf, userpass, local, Some(db_namespace_id)).await
+    }
+
+    /// Common helper function to start the MarketMaker.
+    ///
+    /// * `conf` - The command-line configuration passed to the MarketMaker.
+    ///            Unique P2P in-memory port is injected as `p2p_in_memory_port` unless this field is already present.
+    /// * `userpass` - RPC API key. We should probably extract it automatically from the MM log.
+    /// * `local` - Function to start the MarketMaker locally. Required for nodes running in a browser.
+    /// * `db_namespace_id` - Optional test database namespace identifier.
+    #[cfg(target_arch = "wasm32")]
+    async fn start_market_maker(
+        mut conf: Json,
+        userpass: String,
+        local: Option<LocalStart>,
+        db_namespace_id: Option<u64>,
     ) -> Result<MarketMakerIt, String> {
         if conf["p2p_in_memory"].is_null() {
             conf["p2p_in_memory"] = Json::Bool(true);
@@ -1383,10 +1427,19 @@ impl MarketMakerIt {
             conf["p2p_in_memory_port"] = Json::Number(new_p2p_port.into());
         }
 
-        let ctx = mm2_core::mm_ctx::MmCtxBuilder::new()
-            .with_conf(conf.clone())
-            .with_test_db_namespace()
-            .into_mm_arc();
+        let ctx = {
+            let builder = MmCtxBuilder::new()
+                .with_conf(conf.clone());
+
+            let builder = if let Some(ns) = db_namespace_id {
+                builder.with_test_db_namespace_with_id(ns)
+            } else {
+                builder.with_test_db_namespace()
+            };
+
+            builder.into_mm_arc()
+        };
+
         let local = try_s!(local.ok_or("!local"));
         local(ctx.clone());
 
@@ -1846,6 +1899,30 @@ pub async fn enable_qrc20(
     json::from_str(&electrum.1).unwrap()
 }
 
+pub async fn peer_connection_healthcheck(mm: &MarketMakerIt, peer_address: &str) -> Json {
+    let response = mm
+        .rpc(&json!({
+            "userpass": mm.userpass,
+            "method": "peer_connection_healthcheck",
+            "mmrpc": "2.0",
+            "params": {
+                "peer_address": peer_address
+            }
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.0,
+        StatusCode::OK,
+        "RPC «peer_connection_healthcheck» failed with {} {}",
+        response.0,
+        response.1
+    );
+
+    json::from_str(&response.1).unwrap()
+}
+
 /// Reads passphrase and userpass from .env file
 pub fn from_env_file(env: Vec<u8>) -> (Option<String>, Option<String>) {
     use regex::bytes::Regex;
@@ -1952,21 +2029,6 @@ pub async fn enable_eth_coin(
     json::from_str(&enable.1).unwrap()
 }
 
-pub async fn enable_spl(mm: &MarketMakerIt, coin: &str) -> Json {
-    let req = json!({
-        "userpass": mm.userpass,
-        "method": "enable_spl",
-        "mmrpc": "2.0",
-        "params": {
-            "ticker": coin,
-            "activation_params": {}
-        }
-    });
-    let enable = mm.rpc(&req).await.unwrap();
-    assert_eq!(enable.0, StatusCode::OK, "'enable_spl' failed: {}", enable.1);
-    json::from_str(&enable.1).unwrap()
-}
-
 pub async fn enable_slp(mm: &MarketMakerIt, coin: &str) -> Json {
     let enable = mm
         .rpc(&json!({
@@ -2055,38 +2117,6 @@ pub async fn enable_bch_with_tokens(
         }))
         .await
         .unwrap();
-    assert_eq!(
-        enable.0,
-        StatusCode::OK,
-        "'enable_bch_with_tokens' failed: {}",
-        enable.1
-    );
-    json::from_str(&enable.1).unwrap()
-}
-
-pub async fn enable_solana_with_tokens(
-    mm: &MarketMakerIt,
-    platform_coin: &str,
-    tokens: &[&str],
-    solana_client_url: &str,
-    tx_history: bool,
-) -> Json {
-    let spl_requests: Vec<_> = tokens.iter().map(|ticker| json!({ "ticker": ticker })).collect();
-    let req = json!({
-        "userpass": mm.userpass,
-        "method": "enable_solana_with_tokens",
-        "mmrpc": "2.0",
-        "params": {
-            "ticker": platform_coin,
-            "confirmation_commitment": "finalized",
-            "allow_slp_unsafe_conf": true,
-            "client_url": solana_client_url,
-            "tx_history": tx_history,
-            "spl_tokens_requests": spl_requests,
-        }
-    });
-
-    let enable = mm.rpc(&req).await.unwrap();
     assert_eq!(
         enable.0,
         StatusCode::OK,
@@ -2844,6 +2874,20 @@ pub async fn get_shared_db_id(mm: &MarketMakerIt) -> GetSharedDbIdResult {
     res.result
 }
 
+pub async fn get_wallet_names(mm: &MarketMakerIt) -> GetWalletNamesResult {
+    let request = mm
+        .rpc(&json!({
+            "userpass": mm.userpass,
+            "method": "get_wallet_names",
+            "mmrpc": "2.0",
+        }))
+        .await
+        .unwrap();
+    assert_eq!(request.0, StatusCode::OK, "'get_wallet_names' failed: {}", request.1);
+    let res: RpcSuccessResponse<_> = json::from_str(&request.1).unwrap();
+    res.result
+}
+
 pub async fn max_maker_vol(mm: &MarketMakerIt, coin: &str) -> RpcResponse {
     let rc = mm
         .rpc(&json!({
@@ -2909,6 +2953,10 @@ pub async fn enable_tendermint(
     tx_history: bool,
 ) -> Json {
     let ibc_requests: Vec<_> = ibc_assets.iter().map(|ticker| json!({ "ticker": ticker })).collect();
+    let nodes: Vec<Json> = rpc_urls
+        .iter()
+        .map(|u| json!({"url": u, "komodo_proxy": false }))
+        .collect();
 
     let request = json!({
         "userpass": mm.userpass,
@@ -2917,7 +2965,7 @@ pub async fn enable_tendermint(
         "params": {
             "ticker": coin,
             "tokens_params": ibc_requests,
-            "rpc_urls": rpc_urls,
+            "nodes": nodes,
             "tx_history": tx_history
         }
     });
@@ -2945,6 +2993,10 @@ pub async fn enable_tendermint_without_balance(
     tx_history: bool,
 ) -> Json {
     let ibc_requests: Vec<_> = ibc_assets.iter().map(|ticker| json!({ "ticker": ticker })).collect();
+    let nodes: Vec<Json> = rpc_urls
+        .iter()
+        .map(|u| json!({"url": u, "komodo_proxy": false }))
+        .collect();
 
     let request = json!({
         "userpass": mm.userpass,
@@ -2953,7 +3005,7 @@ pub async fn enable_tendermint_without_balance(
         "params": {
             "ticker": coin,
             "tokens_params": ibc_requests,
-            "rpc_urls": rpc_urls,
+            "nodes": nodes,
             "tx_history": tx_history,
             "get_balances": false
         }
@@ -3199,6 +3251,103 @@ pub async fn enable_eth_with_tokens_v2(
             _ => Timer::sleep(1.).await,
         }
     }
+}
+
+async fn init_erc20_token(
+    mm: &MarketMakerIt,
+    ticker: &str,
+    protocol: Option<Json>,
+    path_to_address: Option<HDAccountAddressId>,
+) -> Result<(StatusCode, Json), Json> {
+    let (status, response, _) = mm.rpc(&json!({
+        "userpass": mm.userpass,
+        "method": "task::enable_erc20::init",
+        "mmrpc": "2.0",
+        "params": {
+            "ticker": ticker,
+            "protocol": protocol,
+            "activation_params": {
+                "path_to_address": path_to_address.unwrap_or_default(),
+            }
+        }
+    }))
+        .await
+        .unwrap();
+
+    if status.is_success() {
+        Ok((status, json::from_str(&response).unwrap()))
+    } else {
+        Err(json::from_str(&response).unwrap())
+    }
+}
+
+async fn init_erc20_token_status(mm: &MarketMakerIt, task_id: u64) -> Json {
+    let request = mm
+        .rpc(&json!({
+            "userpass": mm.userpass,
+            "method": "task::enable_erc20::status",
+            "mmrpc": "2.0",
+            "params": {
+                "task_id": task_id,
+            }
+        }))
+        .await
+        .unwrap();
+    assert_eq!(
+        request.0,
+        StatusCode::OK,
+        "'task::enable_erc20::status' failed: {}",
+        request.1
+    );
+    json::from_str(&request.1).unwrap()
+}
+
+pub async fn enable_erc20_token_v2(
+    mm: &MarketMakerIt,
+    ticker: &str,
+    protocol: Option<Json>,
+    timeout: u64,
+    path_to_address: Option<HDAccountAddressId>,
+) -> Result<InitTokenActivationResult, Json> {
+    let init = init_erc20_token(mm, ticker, protocol, path_to_address).await?.1;
+    let init: RpcV2Response<InitTaskResult> = json::from_value(init).unwrap();
+    let timeout = wait_until_ms(timeout * 1000);
+
+    loop {
+        if now_ms() > timeout {
+            panic!("{} initialization timed out", ticker);
+        }
+
+        let status = init_erc20_token_status(mm, init.result.task_id).await;
+        let status: RpcV2Response<InitErc20TokenStatus> = json::from_value(status).unwrap();
+        match status.result {
+            InitErc20TokenStatus::Ok(result) => break Ok(result),
+            InitErc20TokenStatus::Error(e) => break Err(e),
+            _ => Timer::sleep(1.).await,
+        }
+    }
+}
+
+pub async fn get_token_info(mm: &MarketMakerIt, protocol: Json) -> TokenInfoResponse {
+    let response = mm
+        .rpc(&json!({
+            "userpass": mm.userpass,
+            "method": "get_token_info",
+            "mmrpc": "2.0",
+            "params": {
+                "protocol": protocol,
+            }
+        }))
+        .await
+        .unwrap();
+    assert_eq!(
+        response.0,
+        StatusCode::OK,
+        "'get_token_info' failed: {}",
+        response.1
+    );
+    let response_json: Json = json::from_str(&response.1).unwrap();
+    json::from_value(response_json["result"].clone()).unwrap()
 }
 
 /// Note that mm2 ignores `volume` if `max` is true.
