@@ -2209,18 +2209,28 @@ pub enum StakingDetails {
     Cosmos(Box<rpc_command::tendermint::staking::DelegationPayload>),
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 pub struct AddDelegateRequest {
     pub coin: String,
     pub staking_details: StakingDetails,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 pub struct RemoveDelegateRequest {
     pub coin: String,
     pub staking_details: Option<StakingDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+pub enum ClaimingDetails {
+    Cosmos(rpc_command::tendermint::staking::ClaimRewardsPayload),
+}
+
+#[derive(Deserialize)]
+pub struct ClaimStakingRewardsRequest {
+    pub coin: String,
+    pub claiming_details: ClaimingDetails,
 }
 
 #[derive(Deserialize)]
@@ -2349,6 +2359,7 @@ impl KmdRewardsDetails {
 pub enum TransactionType {
     StakingDelegation,
     RemoveDelegation,
+    ClaimDelegationRewards,
     #[default]
     StandardTransfer,
     TokenTransfer(BytesJson),
@@ -2848,6 +2859,14 @@ pub enum DelegationError {
         available: BigDecimal,
         requested: BigDecimal,
     },
+    #[display(
+        fmt = "Fee ({}) exceeds reward ({}) which makes this unprofitable. Set 'force' to true in the request to bypass this check.",
+        fee,
+        reward
+    )]
+    UnprofitableReward { reward: BigDecimal, fee: BigDecimal },
+    #[display(fmt = "There is no reward for {} to claim.", coin)]
+    NothingToClaim { coin: String },
     #[display(fmt = "{}", _0)]
     CannotInteractWithSmartContract(String),
     #[from_stringify("ScriptHashTypeNotSupported")]
@@ -4983,6 +5002,22 @@ pub async fn add_delegation(ctx: MmArc, req: AddDelegateRequest) -> DelegationRe
             };
 
             tendermint.delegate(*req).await
+        },
+    }
+}
+
+pub async fn claim_staking_rewards(ctx: MmArc, req: ClaimStakingRewardsRequest) -> DelegationResult {
+    match req.claiming_details {
+        ClaimingDetails::Cosmos(r) => {
+            let coin = lp_coinfind_or_err(&ctx, &req.coin).await?;
+
+            let MmCoinEnum::Tendermint(tendermint) = coin else {
+                return MmError::err(DelegationError::InvalidPayload {
+                    reason: format!("{} is not a Cosmos coin", req.coin)
+                });
+            };
+
+            tendermint.claim_staking_rewards(r).await
         },
     }
 }
