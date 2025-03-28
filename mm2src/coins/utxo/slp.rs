@@ -1727,6 +1727,7 @@ impl MmCoin for SlpToken {
             &stage,
         )
         .await?;
+
         Ok(TradeFee {
             coin: self.platform_coin.ticker().into(),
             amount: fee.into(),

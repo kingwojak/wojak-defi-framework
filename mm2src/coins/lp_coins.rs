@@ -3927,8 +3927,7 @@ impl DexFee {
     /// Gets the burn amount associated with the dex fee, if applicable.
     pub fn burn_amount(&self) -> Option<MmNumber> {
         match self {
-            DexFee::NoFee => None,
-            DexFee::Standard(_) => None,
+            DexFee::Standard(_) | DexFee::NoFee => None,
             DexFee::WithBurn { burn_amount, .. } => Some(burn_amount.clone()),
         }
     }
