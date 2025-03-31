@@ -4,8 +4,6 @@ pub mod tx_history_events;
 mod tx_streaming_tests;
 pub mod z_balance_streaming;
 mod z_coin_errors;
-#[cfg(all(test, not(target_arch = "wasm32"), feature = "zhtlc-native-tests"))]
-mod z_coin_native_tests;
 mod z_htlc;
 mod z_rpc;
 mod z_tx_history;
@@ -72,7 +70,8 @@ use std::num::TryFromIntError;
 use std::path::PathBuf;
 use std::sync::Arc;
 pub use z_coin_errors::*;
-use z_htlc::{z_p2sh_spend, z_send_dex_fee, z_send_htlc};
+pub use z_htlc::z_send_dex_fee;
+use z_htlc::{z_p2sh_spend, z_send_htlc};
 use z_rpc::init_light_client;
 pub use z_rpc::{FirstSyncBlock, SyncStatus};
 use z_rpc::{SaplingSyncConnector, SaplingSyncGuard};
@@ -90,8 +89,6 @@ use zcash_primitives::zip32::ChildIndex as Zip32Child;
 use zcash_primitives::{constants::mainnet as z_mainnet_constants, sapling::PaymentAddress,
                        zip32::ExtendedFullViewingKey, zip32::ExtendedSpendingKey};
 use zcash_proofs::prover::LocalTxProver;
-
-use self::storage::store_change_output;
 
 cfg_native!(
     use common::{async_blocking, sha256_digest};
@@ -282,12 +279,19 @@ impl ZCoin {
     /// Asynchronously checks the synchronization status and returns `true` if
     /// the Sapling state has finished synchronizing, meaning that the block number is available.
     /// Otherwise, it returns `false`.
+    #[cfg(any(test, feature = "run-docker-tests"))]
     #[inline]
     pub async fn is_sapling_state_synced(&self) -> bool {
-        matches!(
-            self.sync_status().await,
-            Ok(SyncStatus::Finished { block_number: _, .. })
-        )
+        use futures::StreamExt;
+
+        let mut watcher = self.z_fields.sync_state_connector.lock().await;
+        while let Some(sync) = watcher.sync_watcher.next().await {
+            if matches!(sync, SyncStatus::Finished { .. }) {
+                return true;
+            }
+        }
+
+        false
     }
 
     #[inline]
@@ -474,12 +478,6 @@ impl ZCoin {
             TxBuilderSpawner::request_tx_result(tx_builder, BranchId::Sapling, self.z_fields.z_tx_prover.clone())
                 .await?
                 .tx_result?;
-
-        // Store any change outputs we created in this transaction by decrypting them with our keys
-        // and saving them to the wallet database for future spends
-        store_change_output(self.consensus_params_ref(), &self.z_fields.light_wallet_db, &tx)
-            .await
-            .map_to_mm(GenTxError::SaveChangeNotesError)?;
 
         let additional_data = AdditionalTxData {
             received_by_me,
@@ -1079,7 +1077,6 @@ impl<'a> ZCoinBuilder<'a> {
             .await
             .mm_err(|err| ZCoinBuildError::ZCashParamsError(err.to_string()))?
         {
-            // save params
             params_db
                 .download_and_save_params()
                 .await
@@ -1096,21 +1093,27 @@ impl<'a> ZCoinBuilder<'a> {
     }
 }
 
-/// Initialize `ZCoin` with a forced `z_spending_key`.
+/// Initialize `ZCoin` with a forced `z_spending_key` for dockerized tests.
 /// db_dir_path is where ZOMBIE_wallet.db located
 /// Note that ZOMBIE_cache.db (db where blocks are downloaded to create ZOMBIE_wallet.db) is created in-memory (see BlockDbImpl::new fn)
-#[cfg(all(test, feature = "zhtlc-native-tests"))]
+#[cfg(any(test, feature = "run-docker-tests"))]
 #[allow(clippy::too_many_arguments)]
-async fn z_coin_from_conf_and_params_with_z_key(
+pub async fn z_coin_from_conf_and_params_with_docker(
     ctx: &MmArc,
     ticker: &str,
     conf: &Json,
     params: &ZcoinActivationParams,
     priv_key_policy: PrivKeyBuildPolicy,
     db_dir_path: PathBuf,
-    z_spending_key: ExtendedSpendingKey,
     protocol_info: ZcoinProtocolInfo,
+    spending_key: &str,
 ) -> Result<ZCoin, MmError<ZCoinBuildError>> {
+    use zcash_client_backend::encoding::decode_extended_spending_key;
+    let z_spending_key =
+        decode_extended_spending_key(z_mainnet_constants::HRP_SAPLING_EXTENDED_SPENDING_KEY, spending_key)
+            .unwrap()
+            .unwrap();
+
     let builder = ZCoinBuilder::new(
         ctx,
         ticker,
