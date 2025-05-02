@@ -42,15 +42,17 @@
 
 #[cfg(not(target_arch = "wasm32"))] use common::block_on;
 use common::crash_reports::init_crash_reports;
+use common::executor::Timer;
 use common::log;
 use common::log::LogLevel;
 use common::password_policy::password_policy;
-use mm2_core::mm_ctx::MmCtxBuilder;
+use mm2_core::mm_ctx::{MmArc, MmCtxBuilder};
 
-#[cfg(feature = "custom-swap-locktime")] use common::log::warn;
-#[cfg(feature = "custom-swap-locktime")]
+#[cfg(any(feature = "custom-swap-locktime", test, feature = "run-docker-tests"))]
+use common::log::warn;
+#[cfg(any(feature = "custom-swap-locktime", test, feature = "run-docker-tests"))]
 use lp_swap::PAYMENT_LOCKTIME;
-#[cfg(feature = "custom-swap-locktime")]
+#[cfg(any(feature = "custom-swap-locktime", test, feature = "run-docker-tests"))]
 use std::sync::atomic::Ordering;
 
 use gstuff::slurp;
@@ -81,11 +83,12 @@ pub mod lp_stats;
 pub mod lp_swap;
 pub mod lp_wallet;
 pub mod rpc;
+mod swap_versioning;
 #[cfg(all(target_arch = "wasm32", test))] mod wasm_tests;
 
 pub const PASSWORD_MAXIMUM_CONSECUTIVE_CHARACTERS: usize = 3;
 
-#[cfg(feature = "custom-swap-locktime")]
+#[cfg(any(feature = "custom-swap-locktime", test, feature = "run-docker-tests"))]
 const CUSTOM_PAYMENT_LOCKTIME_DEFAULT: u64 = 900;
 
 pub struct LpMainParams {
@@ -102,7 +105,7 @@ impl LpMainParams {
     }
 }
 
-#[cfg(feature = "custom-swap-locktime")]
+#[cfg(any(feature = "custom-swap-locktime", test, feature = "run-docker-tests"))]
 /// Reads `payment_locktime` from conf arg and assigns it into `PAYMENT_LOCKTIME` in lp_swap.
 /// Assigns 900 if `payment_locktime` is invalid or not provided.
 fn initialize_payment_locktime(conf: &Json) {
@@ -124,7 +127,7 @@ pub async fn lp_main(
     ctx_cb: &dyn Fn(u32),
     version: String,
     datetime: String,
-) -> Result<(), String> {
+) -> Result<MmArc, String> {
     let log_filter = params.filter.unwrap_or_default();
     // Logger can be initialized once.
     // If `kdf` is linked as a library, and `kdf` is restarted, `init_logger` returns an error.
@@ -150,7 +153,7 @@ pub async fn lp_main(
         }
     }
 
-    #[cfg(feature = "custom-swap-locktime")]
+    #[cfg(any(feature = "custom-swap-locktime", test, feature = "run-docker-tests"))]
     initialize_payment_locktime(&conf);
 
     let ctx = MmCtxBuilder::new()
@@ -164,15 +167,28 @@ pub async fn lp_main(
     #[cfg(not(target_arch = "wasm32"))]
     spawn_ctrl_c_handler(ctx.clone());
 
-    try_s!(lp_init(ctx, version, datetime).await);
-    Ok(())
+    try_s!(lp_init(ctx.clone(), version, datetime).await);
+    Ok(ctx)
+}
+
+pub async fn lp_run(ctx: MmArc) {
+    // In the mobile version we might depend on `lp_init` staying around until the context stops.
+    loop {
+        if ctx.is_stopping() {
+            break;
+        };
+        Timer::sleep(0.2).await
+    }
+
+    // Clearing up the running swaps removes any circular references that might prevent the context from being dropped.
+    lp_swap::clear_running_swaps(&ctx);
 }
 
 /// Handles CTRL-C signals and shutdowns the KDF runtime gracefully.
 ///
 /// It's important to spawn this task as soon as `Ctx` is in the correct state.
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_ctrl_c_handler(ctx: mm2_core::mm_ctx::MmArc) {
+fn spawn_ctrl_c_handler(ctx: MmArc) {
     use crate::lp_dispatcher::{dispatch_lp_event, StopCtxEvent};
 
     common::executor::spawn(async move {
@@ -367,7 +383,8 @@ pub fn run_lp_main(
     let log_filter = LogLevel::from_env();
 
     let params = LpMainParams::with_conf(conf).log_filter(log_filter);
-    try_s!(block_on(lp_main(params, ctx_cb, version, datetime)));
+    let ctx = try_s!(block_on(lp_main(params, ctx_cb, version, datetime)));
+    block_on(lp_run(ctx));
     Ok(())
 }
 

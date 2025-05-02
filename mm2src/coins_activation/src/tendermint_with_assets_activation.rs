@@ -20,13 +20,13 @@ use common::executor::{AbortSettings, SpawnAbortable};
 use common::{true_f, Future01CompatExt};
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
-use mm2_event_stream::behaviour::{EventBehaviour, EventInitStatus};
-use mm2_event_stream::EventStreamConfiguration;
 use mm2_number::BigDecimal;
 use rpc_task::RpcTaskHandleShared;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value as Json;
 use std::collections::{HashMap, HashSet};
+
+pub type TendermintCoinTaskManagerShared = InitPlatformCoinWithTokensTaskManagerShared<TendermintCoin>;
 
 impl TokenOf for TendermintToken {
     type PlatformCoin = TendermintCoin;
@@ -235,17 +235,20 @@ impl PlatformCoinWithTokensActivationOps for TendermintCoin {
         activation_request: Self::ActivationRequest,
         protocol_conf: Self::PlatformProtocolInfo,
     ) -> Result<Self, MmError<Self::ActivationError>> {
+        if protocol_conf.decimals > 18 {
+            return MmError::err(TendermintInitError {
+                ticker: ticker.clone(),
+                kind: TendermintInitErrorKind::InvalidProtocolData(format!(
+                    "'decimals' value is too high; it must be 18 or lower but the current value is {}",
+                    protocol_conf.decimals
+                )),
+            });
+        }
+
         let conf = TendermintConf::try_from_json(&ticker, coin_conf)?;
         let is_keplr_from_ledger = activation_request.is_keplr_from_ledger && activation_request.with_pubkey.is_some();
 
         let activation_policy = if let Some(pubkey) = activation_request.with_pubkey {
-            if ctx.is_watcher() || ctx.use_watchers() {
-                return MmError::err(TendermintInitError {
-                    ticker: ticker.clone(),
-                    kind: TendermintInitErrorKind::CantUseWatchersWithPubkeyPolicy,
-                });
-            }
-
             TendermintActivationPolicy::with_public_key(pubkey)
         } else {
             let private_key_policy =
@@ -260,9 +263,9 @@ impl PlatformCoinWithTokensActivationOps for TendermintCoin {
             TendermintActivationPolicy::with_private_key_policy(tendermint_private_key_policy)
         };
 
-        TendermintCoin::init(
+        let coin = TendermintCoin::init(
             &ctx,
-            ticker,
+            ticker.clone(),
             conf,
             protocol_conf,
             activation_request.nodes,
@@ -270,7 +273,9 @@ impl PlatformCoinWithTokensActivationOps for TendermintCoin {
             activation_policy,
             is_keplr_from_ledger,
         )
-        .await
+        .await?;
+
+        Ok(coin)
     }
 
     async fn enable_global_nft(
@@ -368,22 +373,7 @@ impl PlatformCoinWithTokensActivationOps for TendermintCoin {
         self.spawner().spawn_with_settings(fut, settings);
     }
 
-    async fn handle_balance_streaming(
-        &self,
-        config: &EventStreamConfiguration,
-    ) -> Result<(), MmError<Self::ActivationError>> {
-        if let EventInitStatus::Failed(err) = EventBehaviour::spawn_if_active(self.clone(), config).await {
-            return MmError::err(TendermintInitError {
-                ticker: self.ticker().to_owned(),
-                kind: TendermintInitErrorKind::BalanceStreamInitError(err),
-            });
-        }
-        Ok(())
-    }
-
-    fn rpc_task_manager(
-        _activation_ctx: &CoinsActivationContext,
-    ) -> &InitPlatformCoinWithTokensTaskManagerShared<TendermintCoin> {
-        unimplemented!()
+    fn rpc_task_manager(activation_ctx: &CoinsActivationContext) -> &TendermintCoinTaskManagerShared {
+        &activation_ctx.init_tendermint_coin_task_manager
     }
 }
