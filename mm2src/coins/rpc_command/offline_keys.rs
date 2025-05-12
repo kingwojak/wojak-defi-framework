@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as Json};
 use bitcoin_hashes::hex::ToHex;
 use std::str::FromStr;
+use keys::{AddressBuilder, AddressFormat, NetworkAddressPrefixes, Private};
+use bitcrypto::ChecksumType;
 
 #[derive(Debug, Deserialize)]
 pub struct OfflineKeysRequest {
@@ -151,8 +153,76 @@ pub async fn offline_keys_export(
         };
 
         let pubkey = key_pair.public().to_vec().to_hex().to_string();
-        let address = format!("{}_{}_address", ticker, key_pair.public().to_vec().to_hex().to_string());
-        let priv_key = key_pair.private().to_string();
+        
+        let is_utxo = if let Some(protocol_type) = coin_conf["protocol"]["type"].as_str() {
+            protocol_type == "UTXO"
+        } else {
+            coin_conf["protocol"].as_str() == Some("UTXO")
+        };
+        
+        let checksum_type = if let Some(checksum) = coin_conf["checksum_type"].as_str() {
+            match checksum {
+                "dgroestl512" => ChecksumType::DGROESTL512,
+                "keccak256" => ChecksumType::KECCAK256,
+                _ => ChecksumType::DSHA256,
+            }
+        } else {
+            ChecksumType::DSHA256
+        };
+        
+        let priv_key = if is_utxo {
+            let wif_type = coin_conf["wiftype"].as_u64().unwrap_or(188) as u8;
+            
+            let private = Private {
+                prefix: wif_type,
+                secret: key_pair.private().secret.clone(),
+                compressed: true,
+                checksum_type,
+            };
+            
+            private.to_string()
+        } else {
+            key_pair.private().to_string()
+        };
+        
+        let address = if is_utxo {
+            let pub_type = coin_conf["pubtype"].as_u64().unwrap_or(60) as u8;
+            let p2sh_type = coin_conf["p2shtype"].as_u64().unwrap_or(85) as u8;
+            
+            let address_format = if coin_conf["segwit"].as_bool().unwrap_or(false) {
+                AddressFormat::Segwit
+            } else {
+                AddressFormat::Standard
+            };
+            
+            let hrp = if address_format.is_segwit() {
+                coin_conf["bech32_hrp"].as_str().map(|s| s.to_string())
+            } else {
+                None
+            };
+            
+            let address_prefixes = NetworkAddressPrefixes {
+                p2pkh: [pub_type].into(),
+                p2sh: [p2sh_type].into(),
+            };
+            
+            let address = AddressBuilder::new(
+                address_format,
+                checksum_type,
+                address_prefixes,
+                hrp,
+            )
+            .as_pkh_from_pk(*key_pair.public())
+            .build()
+            .map_err(|e| OfflineKeysError::KeyDerivationFailed {
+                ticker: ticker.clone(),
+                error: format!("Failed to build address: {}", e),
+            })?;
+            
+            address.to_string()
+        } else {
+            format!("0x{}", key_pair.public().to_vec().to_hex().to_string())
+        };
 
         result.push(CoinKeyInfo {
             coin: ticker.clone(),
@@ -198,6 +268,43 @@ pub async fn offline_hd_keys_export(
         let mut addresses = Vec::with_capacity((req.end_index - req.start_index + 1) as usize);
         let passphrase = ctx.conf["passphrase"].as_str().unwrap_or("");
 
+        let is_utxo = if let Some(protocol_type) = coin_conf["protocol"]["type"].as_str() {
+            protocol_type == "UTXO"
+        } else {
+            coin_conf["protocol"].as_str() == Some("UTXO")
+        };
+        
+        let checksum_type = if let Some(checksum) = coin_conf["checksum_type"].as_str() {
+            match checksum {
+                "dgroestl512" => ChecksumType::DGROESTL512,
+                "keccak256" => ChecksumType::KECCAK256,
+                _ => ChecksumType::DSHA256,
+            }
+        } else {
+            ChecksumType::DSHA256
+        };
+        
+        let wif_type = coin_conf["wiftype"].as_u64().unwrap_or(188) as u8;
+        let pub_type = coin_conf["pubtype"].as_u64().unwrap_or(60) as u8;
+        let p2sh_type = coin_conf["p2shtype"].as_u64().unwrap_or(85) as u8;
+        
+        let address_format = if coin_conf["segwit"].as_bool().unwrap_or(false) {
+            AddressFormat::Segwit
+        } else {
+            AddressFormat::Standard
+        };
+        
+        let hrp = if address_format.is_segwit() {
+            coin_conf["bech32_hrp"].as_str().map(|s| s.to_string())
+        } else {
+            None
+        };
+        
+        let address_prefixes = NetworkAddressPrefixes {
+            p2pkh: [pub_type].into(),
+            p2sh: [p2sh_type].into(),
+        };
+
         let seed = crypto::privkey::bip39_seed_from_passphrase(passphrase)
             .map_err(|e| OfflineKeysError::KeyDerivationFailed {
                 ticker: ticker.clone(),
@@ -237,8 +344,38 @@ pub async fn offline_hd_keys_export(
                 })?;
 
             let pubkey = key_pair.public().to_vec().to_hex().to_string();
-            let address = format!("{}_{}_{}_address", ticker, index, key_pair.public().to_vec().to_hex().to_string());
-            let priv_key = key_pair.private().to_string();
+            
+            let priv_key = if is_utxo {
+                let private = Private {
+                    prefix: wif_type,
+                    secret: key_pair.private().secret.clone(),
+                    compressed: true,
+                    checksum_type,
+                };
+                
+                private.to_string()
+            } else {
+                key_pair.private().to_string()
+            };
+            
+            let address = if is_utxo {
+                let address = AddressBuilder::new(
+                    address_format.clone(),
+                    checksum_type,
+                    address_prefixes.clone(),
+                    hrp.clone(),
+                )
+                .as_pkh_from_pk(*key_pair.public())
+                .build()
+                .map_err(|e| OfflineKeysError::KeyDerivationFailed {
+                    ticker: ticker.clone(),
+                    error: format!("Failed to build address at index {}: {}", index, e),
+                })?;
+                
+                address.to_string()
+            } else {
+                format!("0x{}", key_pair.public().to_vec().to_hex().to_string())
+            };
 
             addresses.push(HdAddressInfo {
                 index,
@@ -318,8 +455,76 @@ pub async fn offline_iguana_keys_export(
         };
 
         let pubkey = key_pair.public().to_vec().to_hex().to_string();
-        let address = format!("{}_{}_address", ticker, key_pair.public().to_vec().to_hex().to_string());
-        let priv_key = key_pair.private().to_string();
+        
+        let is_utxo = if let Some(protocol_type) = coin_conf["protocol"]["type"].as_str() {
+            protocol_type == "UTXO"
+        } else {
+            coin_conf["protocol"].as_str() == Some("UTXO")
+        };
+        
+        let checksum_type = if let Some(checksum) = coin_conf["checksum_type"].as_str() {
+            match checksum {
+                "dgroestl512" => ChecksumType::DGROESTL512,
+                "keccak256" => ChecksumType::KECCAK256,
+                _ => ChecksumType::DSHA256,
+            }
+        } else {
+            ChecksumType::DSHA256
+        };
+        
+        let priv_key = if is_utxo {
+            let wif_type = coin_conf["wiftype"].as_u64().unwrap_or(188) as u8;
+            
+            let private = Private {
+                prefix: wif_type,
+                secret: key_pair.private().secret.clone(),
+                compressed: true,
+                checksum_type,
+            };
+            
+            private.to_string()
+        } else {
+            key_pair.private().to_string()
+        };
+        
+        let address = if is_utxo {
+            let pub_type = coin_conf["pubtype"].as_u64().unwrap_or(60) as u8;
+            let p2sh_type = coin_conf["p2shtype"].as_u64().unwrap_or(85) as u8;
+            
+            let address_format = if coin_conf["segwit"].as_bool().unwrap_or(false) {
+                AddressFormat::Segwit
+            } else {
+                AddressFormat::Standard
+            };
+            
+            let hrp = if address_format.is_segwit() {
+                coin_conf["bech32_hrp"].as_str().map(|s| s.to_string())
+            } else {
+                None
+            };
+            
+            let address_prefixes = NetworkAddressPrefixes {
+                p2pkh: [pub_type].into(),
+                p2sh: [p2sh_type].into(),
+            };
+            
+            let address = AddressBuilder::new(
+                address_format,
+                checksum_type,
+                address_prefixes,
+                hrp,
+            )
+            .as_pkh_from_pk(*key_pair.public())
+            .build()
+            .map_err(|e| OfflineKeysError::KeyDerivationFailed {
+                ticker: ticker.clone(),
+                error: format!("Failed to build address: {}", e),
+            })?;
+            
+            address.to_string()
+        } else {
+            format!("0x{}", key_pair.public().to_vec().to_hex().to_string())
+        };
 
         result.push(CoinKeyInfo {
             coin: ticker.clone(),
