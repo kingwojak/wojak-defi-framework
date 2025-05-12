@@ -75,6 +75,8 @@ pub enum OfflineKeysError {
     HardwareWalletNotSupported,
     #[display(fmt = "'display_priv_key' is not supported for MetaMask")]
     MetamaskNotSupported,
+    #[display(fmt = "Missing required prefix value '{}' for coin {}", prefix_name, ticker)]
+    MissingPrefixValue { ticker: String, prefix_name: String },
 }
 
 impl HttpStatusCode for OfflineKeysError {
@@ -88,6 +90,7 @@ impl HttpStatusCode for OfflineKeysError {
             Self::HdRangeTooLarge => StatusCode::BAD_REQUEST,
             Self::HardwareWalletNotSupported => StatusCode::BAD_REQUEST,
             Self::MetamaskNotSupported => StatusCode::BAD_REQUEST,
+            Self::MissingPrefixValue { .. } => StatusCode::BAD_REQUEST,
         }
     }
 }
@@ -171,7 +174,8 @@ pub async fn offline_keys_export(
         };
         
         let priv_key = if is_utxo {
-            let wif_type = coin_conf["wiftype"].as_u64().unwrap_or(188) as u8;
+            let (wif_type, _, _) = extract_prefix_values(ticker, &coin_conf)
+                .map_err(|e| e)?;
             
             let private = Private {
                 prefix: wif_type,
@@ -186,8 +190,8 @@ pub async fn offline_keys_export(
         };
         
         let address = if is_utxo {
-            let pub_type = coin_conf["pubtype"].as_u64().unwrap_or(60) as u8;
-            let p2sh_type = coin_conf["p2shtype"].as_u64().unwrap_or(85) as u8;
+            let (_, pub_type, p2sh_type) = extract_prefix_values(ticker, &coin_conf)
+                .map_err(|e| e)?;
             
             let address_format = if coin_conf["segwit"].as_bool().unwrap_or(false) {
                 AddressFormat::Segwit
@@ -284,9 +288,8 @@ pub async fn offline_hd_keys_export(
             ChecksumType::DSHA256
         };
         
-        let wif_type = coin_conf["wiftype"].as_u64().unwrap_or(188) as u8;
-        let pub_type = coin_conf["pubtype"].as_u64().unwrap_or(60) as u8;
-        let p2sh_type = coin_conf["p2shtype"].as_u64().unwrap_or(85) as u8;
+        let (wif_type, pub_type, p2sh_type) = extract_prefix_values(ticker, &coin_conf)
+            .map_err(|e| e)?;
         
         let address_format = if coin_conf["segwit"].as_bool().unwrap_or(false) {
             AddressFormat::Segwit
@@ -473,7 +476,8 @@ pub async fn offline_iguana_keys_export(
         };
         
         let priv_key = if is_utxo {
-            let wif_type = coin_conf["wiftype"].as_u64().unwrap_or(188) as u8;
+            let (wif_type, _, _) = extract_prefix_values(ticker, &coin_conf)
+                .map_err(|e| e)?;
             
             let private = Private {
                 prefix: wif_type,
@@ -488,8 +492,8 @@ pub async fn offline_iguana_keys_export(
         };
         
         let address = if is_utxo {
-            let pub_type = coin_conf["pubtype"].as_u64().unwrap_or(60) as u8;
-            let p2sh_type = coin_conf["p2shtype"].as_u64().unwrap_or(85) as u8;
+            let (_, pub_type, p2sh_type) = extract_prefix_values(ticker, &coin_conf)
+                .map_err(|e| e)?;
             
             let address_format = if coin_conf["segwit"].as_bool().unwrap_or(false) {
                 AddressFormat::Segwit
@@ -546,17 +550,50 @@ fn coin_conf_with_protocol(
     let conf = match conf_override {
         Some(override_conf) => override_conf,
         None => {
-            json!({
-                "coin": ticker,
-                "name": ticker,
-                "protocol": "UTXO",
-                "pubtype": 60,
-                "p2shtype": 85,
-                "wiftype": 188,
-                "txfee": 1000
-            })
+            match ctx.conf["coins"].as_array() {
+                Some(coins) => {
+                    let coin_config = coins
+                        .iter()
+                        .find(|coin| coin["coin"].as_str() == Some(ticker))
+                        .cloned()
+                        .unwrap_or(Json::Null);
+                    
+                    if coin_config.is_null() {
+                        return Err(format!("Coin configuration not found for {}", ticker));
+                    }
+                    coin_config
+                },
+                None => {
+                    return Err(format!("Coins configuration not found in context"));
+                }
+            }
         }
     };
     let protocol = conf["protocol"].clone();
     Ok((conf, protocol))
+}
+
+fn extract_prefix_values(ticker: &str, coin_conf: &Json) -> Result<(u8, u8, u8), OfflineKeysError> {
+    let wif_type = coin_conf["wiftype"]
+        .as_u64()
+        .ok_or_else(|| OfflineKeysError::MissingPrefixValue {
+            ticker: ticker.to_string(),
+            prefix_name: "wiftype".to_string(),
+        })?;
+    
+    let pub_type = coin_conf["pubtype"]
+        .as_u64()
+        .ok_or_else(|| OfflineKeysError::MissingPrefixValue {
+            ticker: ticker.to_string(),
+            prefix_name: "pubtype".to_string(),
+        })?;
+    
+    let p2sh_type = coin_conf["p2shtype"]
+        .as_u64()
+        .ok_or_else(|| OfflineKeysError::MissingPrefixValue {
+            ticker: ticker.to_string(),
+            prefix_name: "p2shtype".to_string(),
+        })?;
+    
+    Ok((wif_type as u8, pub_type as u8, p2sh_type as u8))
 }
