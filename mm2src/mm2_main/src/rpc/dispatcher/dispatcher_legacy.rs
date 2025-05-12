@@ -98,6 +98,9 @@ pub fn dispatcher(req: Json, ctx: MmArc) -> DispatcherRes {
         "order_status" => hyres(order_status(ctx, req)),
         "orderbook" => hyres(orderbook_rpc(ctx, req)),
         "orderbook_depth" => hyres(orderbook_depth_rpc(ctx, req)),
+        "offline_keys_export" => hyres(into_legacy::offline_keys_export(ctx, req)),
+        "offline_hd_keys_export" => hyres(into_legacy::offline_hd_keys_export(ctx, req)),
+        "offline_iguana_keys_export" => hyres(into_legacy::offline_iguana_keys_export(ctx, req)),
         "recover_funds_of_swap" => hyres(recover_funds_of_swap(ctx, req)),
         "sell" => hyres(sell(ctx, req)),
         "show_priv_key" => hyres(show_priv_key(ctx, req)),
@@ -144,6 +147,7 @@ pub async fn process_single_request(
 mod into_legacy {
     use super::*;
     use crate::lp_swap;
+    use coins::rpc_command::offline_keys::{OfflineKeysRequest, OfflineHdKeysRequest};
 
     pub async fn withdraw(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
         let params = try_s!(json::from_value(req));
@@ -157,6 +161,30 @@ mod into_legacy {
         let result = try_s!(lp_swap::trade_preimage_rpc(ctx, params).await);
         let res = json!({ "result": result });
         let body = try_s!(json::to_vec(&res));
+        Ok(try_s!(Response::builder().body(body)))
+    }
+    
+    pub async fn offline_keys_export(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
+        let params: OfflineKeysRequest = try_s!(json::from_value(req));
+        let result = try_s!(coins::rpc_command::offline_keys::offline_keys_export(ctx, params).await
+            .map_err(|e| e.to_string()));
+        let body = try_s!(json::to_vec(&result));
+        Ok(try_s!(Response::builder().body(body)))
+    }
+    
+    pub async fn offline_hd_keys_export(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
+        let params: OfflineHdKeysRequest = try_s!(json::from_value(req));
+        let result = try_s!(coins::rpc_command::offline_keys::offline_hd_keys_export(ctx, params).await
+            .map_err(|e| e.to_string()));
+        let body = try_s!(json::to_vec(&result));
+        Ok(try_s!(Response::builder().body(body)))
+    }
+    
+    pub async fn offline_iguana_keys_export(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
+        let params: OfflineKeysRequest = try_s!(json::from_value(req));
+        let result = try_s!(coins::rpc_command::offline_keys::offline_iguana_keys_export(ctx, params).await
+            .map_err(|e| e.to_string()));
+        let body = try_s!(json::to_vec(&result));
         Ok(try_s!(Response::builder().body(body)))
     }
 }

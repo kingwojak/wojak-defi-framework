@@ -1991,6 +1991,51 @@ fn test_show_priv_key() {
 
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
+fn test_offline_show_priv_key() {
+    let coins = json!([rick_conf(), morty_conf(), eth_dev_conf()]);
+
+    let mm = MarketMakerIt::start(
+        json! ({
+            "gui": "nogui",
+            "netid": 9998,
+            "myipaddr": env::var ("BOB_TRADE_IP") .ok(),
+            "rpcip": env::var ("BOB_TRADE_IP") .ok(),
+            "canbind": env::var ("BOB_TRADE_PORT") .ok().map (|s| s.parse::<i64>().unwrap()),
+            "passphrase": "bob passphrase",
+            "coins": coins,
+            "rpc_password": "pass",
+            "i_am_seed": true,
+        }),
+        "pass".into(),
+        None,
+    )
+    .unwrap();
+
+    let (_dump_log, _dump_dashboard) = mm.mm_dump();
+    log!("Log path: {}", mm.log_path.display());
+    
+    check_priv_key(&mm, "RICK", "UvCjJf4dKSs2vFGVtCnUTAhR5FTZGdg43DDRa9s7s5DV1sSDX14g");
+    check_priv_key(
+        &mm,
+        "ETH",
+        "0xb8c774f071de08c7fd8f62b97f1a5726f6ce9f1bcf141b70b86689254ed6714e",
+    );
+    
+    log!(
+        "enable_coins: {:?}",
+        block_on(enable_coins_eth_electrum(&mm, ETH_SEPOLIA_NODES))
+    );
+    
+    check_priv_key(&mm, "RICK", "UvCjJf4dKSs2vFGVtCnUTAhR5FTZGdg43DDRa9s7s5DV1sSDX14g");
+    check_priv_key(
+        &mm,
+        "ETH",
+        "0xb8c774f071de08c7fd8f62b97f1a5726f6ce9f1bcf141b70b86689254ed6714e",
+    );
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
 fn test_electrum_and_enable_response() {
     let coins = json! ([
         {"coin":"RICK","asset":"RICK","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"},"mature_confirmations":101},
