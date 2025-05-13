@@ -5460,17 +5460,44 @@ pub async fn set_requires_notarization(ctx: MmArc, req: Json) -> Result<Response
 
 pub async fn show_priv_key(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     let ticker = try_s!(req["coin"].as_str().ok_or("No 'coin' field")).to_owned();
-    let coin = match lp_coinfind(&ctx, &ticker).await {
-        Ok(Some(t)) => t,
-        Ok(None) => return ERR!("No such coin: {}", ticker),
-        Err(err) => return ERR!("!lp_coinfind({}): {}", ticker, err),
-    };
-    let res = try_s!(json::to_vec(&json!({
-        "result": {
-            "coin": ticker,
-            "priv_key": try_s!(coin.display_priv_key()),
+    
+    let result = match lp_coinfind(&ctx, &ticker).await {
+        Ok(Some(t)) => {
+            // Use the original implementation for activated coins
+            let priv_key = try_s!(t.display_priv_key());
+            json!({
+                "result": {
+                    "coin": ticker,
+                    "priv_key": priv_key,
+                }
+            })
+        },
+        Ok(None) | Err(_) => {
+            use crate::rpc_command::offline_keys::{OfflineKeysRequest, offline_keys_export};
+            
+            let offline_req = OfflineKeysRequest {
+                coins: vec![ticker.clone()],
+            };
+            
+            match offline_keys_export(ctx, offline_req).await {
+                Ok(response) => {
+                    if response.result.is_empty() {
+                        return ERR!("Failed to retrieve private key for {}", ticker);
+                    }
+                    let coin_info = &response.result[0];
+                    json!({
+                        "result": {
+                            "coin": coin_info.coin,
+                            "priv_key": coin_info.priv_key,
+                        }
+                    })
+                },
+                Err(e) => return ERR!("{}", e),
+            }
         }
-    })));
+    };
+    
+    let res = try_s!(json::to_vec(&result));
     Ok(try_s!(Response::builder().body(res)))
 }
 
