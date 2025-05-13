@@ -257,6 +257,9 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
             handle_mmrpc(ctx, request, one_inch_v6_0_classic_swap_liquidity_sources_rpc).await
         },
         "1inch_v6_0_classic_swap_tokens" => handle_mmrpc(ctx, request, one_inch_v6_0_classic_swap_tokens_rpc).await,
+        "offline_keys_export" => handle_mmrpc(ctx, request, coins::rpc_command::offline_keys::offline_keys_export).await,
+        "offline_hd_keys_export" => handle_mmrpc(ctx, request, coins::rpc_command::offline_keys::offline_hd_keys_export).await,
+        "offline_iguana_keys_export" => handle_mmrpc(ctx, request, coins::rpc_command::offline_keys::offline_iguana_keys_export).await,
         _ => MmError::err(DispatcherError::NoSuchMethod),
     }
 }
