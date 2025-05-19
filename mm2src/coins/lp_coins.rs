@@ -5453,18 +5453,63 @@ pub async fn set_requires_notarization(ctx: MmArc, req: Json) -> Result<Response
 
 pub async fn show_priv_key(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     let ticker = try_s!(req["coin"].as_str().ok_or("No 'coin' field")).to_owned();
-    let coin = match lp_coinfind(&ctx, &ticker).await {
-        Ok(Some(t)) => t,
-        Ok(None) => return ERR!("No such coin: {}", ticker),
-        Err(err) => return ERR!("!lp_coinfind({}): {}", ticker, err),
-    };
-    let res = try_s!(json::to_vec(&json!({
-        "result": {
-            "coin": ticker,
-            "priv_key": try_s!(coin.display_priv_key()),
+    
+    let result = match lp_coinfind(&ctx, &ticker).await {
+        Ok(Some(t)) => {
+            // Try to use the original implementation for activated coins
+            match t.display_priv_key() {
+                Ok(priv_key) => {
+                    json!({
+                        "result": {
+                            "coin": ticker,
+                            "priv_key": priv_key,
+                        }
+                    })
+                },
+                Err(_) => {
+                    try_offline_key_export(&ctx, &ticker).await?
+                }
+            }
+        },
+        Ok(None) | Err(_) => {
+            try_offline_key_export(&ctx, &ticker).await?
         }
-    })));
+    };
+    
+    let res = try_s!(json::to_vec(&result));
     Ok(try_s!(Response::builder().body(res)))
+}
+
+async fn try_offline_key_export(ctx: &MmArc, ticker: &str) -> Result<Json, String> {
+    use crate::rpc_command::offline_keys::{GetPrivateKeysRequest, KeyExportMode, get_private_keys};
+    
+    let offline_req = GetPrivateKeysRequest {
+        coins: vec![ticker.to_string()],
+        mode: KeyExportMode::Standard,
+        start_index: None,
+        end_index: None,
+    };
+    
+    match get_private_keys(ctx.clone(), offline_req).await {
+        Ok(response) => {
+            match response {
+                crate::rpc_command::offline_keys::GetPrivateKeysResponse::Standard(standard_response) => {
+                    if standard_response.result.is_empty() {
+                        return ERR!("Failed to retrieve private key for {}", ticker);
+                    }
+                    let coin_info = &standard_response.result[0];
+                    Ok(json!({
+                        "result": {
+                            "coin": coin_info.coin,
+                            "priv_key": coin_info.priv_key,
+                        }
+                    }))
+                },
+                _ => ERR!("Unexpected response type for {}", ticker),
+            }
+        },
+        Err(e) => ERR!("{}", e),
+    }
 }
 
 pub async fn register_balance_update_handler(
