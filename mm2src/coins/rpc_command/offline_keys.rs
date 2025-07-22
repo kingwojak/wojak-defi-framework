@@ -1,16 +1,16 @@
-use crate::CoinsContext;
 use crate::CoinProtocol;
+use crate::CoinsContext;
+use bitcoin_hashes::hex::ToHex;
+use bitcrypto::ChecksumType;
 use common::HttpStatusCode;
 use crypto::privkey::key_pair_from_seed;
 use derive_more::Display;
 use http::StatusCode;
-use keys::{Private, AddressFormat, AddressBuilder, NetworkAddressPrefixes, AddressPrefix};
+use keys::{AddressBuilder, AddressFormat, AddressPrefix, NetworkAddressPrefixes, Private};
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as Json};
-use bitcoin_hashes::hex::ToHex;
-use bitcrypto::ChecksumType;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum KeyExportMode {
@@ -33,10 +33,7 @@ pub struct GetPrivateKeysRequest {
     pub end_index: Option<u32>,
 }
 
-fn default_mode() -> KeyExportMode {
-    KeyExportMode::Standard
-}
-
+fn default_mode() -> KeyExportMode { KeyExportMode::Standard }
 
 #[derive(Debug, Serialize)]
 pub struct CoinKeyInfo {
@@ -59,7 +56,6 @@ pub struct HdAddressInfo {
     pub address: String,
     pub priv_key: String,
 }
-
 
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
@@ -87,7 +83,11 @@ pub enum OfflineKeysError {
     CoinConfigNotFound(String),
     #[display(fmt = "Failed to derive keys for {}: {}", ticker, error)]
     KeyDerivationFailed { ticker: String, error: String },
-    #[display(fmt = "HD index range is invalid: start_index {} must be less than or equal to end_index {}", start_index, end_index)]
+    #[display(
+        fmt = "HD index range is invalid: start_index {} must be less than or equal to end_index {}",
+        start_index,
+        end_index
+    )]
     InvalidHdRange { start_index: u32, end_index: u32 },
     #[display(fmt = "HD index range is too large: maximum range is 100 addresses")]
     HdRangeTooLarge,
@@ -101,11 +101,7 @@ pub enum OfflineKeysError {
 
 #[derive(Debug, Clone)]
 enum PrefixValues {
-    Utxo {
-        wif_type: u8,
-        pub_type: u8,
-        p2sh_type: u8,
-    },
+    Utxo { wif_type: u8, pub_type: u8, p2sh_type: u8 },
     NonUtxo,
 }
 
@@ -127,13 +123,16 @@ impl HttpStatusCode for OfflineKeysError {
 fn extract_prefix_values(ticker: &str, coin_conf: &Json) -> Result<PrefixValues, OfflineKeysError> {
     let protocol: CoinProtocol = match serde_json::from_value(coin_conf["protocol"].clone()) {
         Ok(protocol) => protocol,
-        Err(_) => return Err(OfflineKeysError::Internal(format!("Failed to parse protocol for {}", ticker))),
-    };
-    
-    match protocol {
-        CoinProtocol::ETH { .. } | CoinProtocol::ERC20 { .. } | CoinProtocol::NFT { .. } => {
-            Ok(PrefixValues::NonUtxo)
+        Err(_) => {
+            return Err(OfflineKeysError::Internal(format!(
+                "Failed to parse protocol for {}",
+                ticker
+            )))
         },
+    };
+
+    match protocol {
+        CoinProtocol::ETH { .. } | CoinProtocol::ERC20 { .. } | CoinProtocol::NFT { .. } => Ok(PrefixValues::NonUtxo),
         CoinProtocol::UTXO | CoinProtocol::QTUM | CoinProtocol::QRC20 { .. } | CoinProtocol::BCH { .. } => {
             let wif_type = coin_conf["wiftype"]
                 .as_u64()
@@ -156,36 +155,37 @@ fn extract_prefix_values(ticker: &str, coin_conf: &Json) -> Result<PrefixValues,
                     prefix_type: "p2shtype".to_string(),
                 })? as u8;
 
-            Ok(PrefixValues::Utxo { wif_type, pub_type, p2sh_type })
+            Ok(PrefixValues::Utxo {
+                wif_type,
+                pub_type,
+                p2sh_type,
+            })
         },
-        _ => Err(OfflineKeysError::Internal(format!("Unsupported protocol for {}: {:?}", ticker, protocol))),
+        _ => Err(OfflineKeysError::Internal(format!(
+            "Unsupported protocol for {}: {:?}",
+            ticker, protocol
+        ))),
     }
 }
 
-fn coin_conf_with_protocol(
-    ctx: &MmArc,
-    ticker: &str,
-    conf_override: Option<Json>,
-) -> Result<(Json, Json), String> {
+fn coin_conf_with_protocol(ctx: &MmArc, ticker: &str, conf_override: Option<Json>) -> Result<(Json, Json), String> {
     let _coins_ctx = CoinsContext::from_ctx(ctx).unwrap();
     let conf = match conf_override {
         Some(override_conf) => override_conf,
-        None => {
-            match crate::coin_conf(ctx, ticker) {
-                Json::Null => {
-                    json!({
-                        "coin": ticker,
-                        "name": ticker,
-                        "protocol": "UTXO",
-                        "pubtype": 60,
-                        "p2shtype": 85,
-                        "wiftype": 188,
-                        "txfee": 1000
-                    })
-                },
-                conf => conf,
-            }
-        }
+        None => match crate::coin_conf(ctx, ticker) {
+            Json::Null => {
+                json!({
+                    "coin": ticker,
+                    "name": ticker,
+                    "protocol": "UTXO",
+                    "pubtype": 60,
+                    "p2shtype": 85,
+                    "wiftype": 188,
+                    "txfee": 1000
+                })
+            },
+            conf => conf,
+        },
     };
     let protocol = conf["protocol"].clone();
     Ok((conf, protocol))
@@ -211,23 +211,29 @@ async fn offline_keys_export_internal(
         }
 
         let passphrase = ctx.conf["passphrase"].as_str().unwrap_or("");
-        
+
         let key_pair = {
             match key_pair_from_seed(passphrase) {
                 Ok(kp) => kp,
-                Err(e) => return MmError::err(OfflineKeysError::KeyDerivationFailed {
-                    ticker: ticker.clone(),
-                    error: e.to_string(),
-                }),
+                Err(e) => {
+                    return MmError::err(OfflineKeysError::KeyDerivationFailed {
+                        ticker: ticker.clone(),
+                        error: e.to_string(),
+                    })
+                },
             }
         };
 
         let prefix_values = extract_prefix_values(ticker, &coin_conf)?;
 
         let pubkey = key_pair.public().to_vec().to_hex().to_string();
-        
+
         let (address, priv_key) = match prefix_values {
-            PrefixValues::Utxo { wif_type, pub_type, p2sh_type } => {
+            PrefixValues::Utxo {
+                wif_type,
+                pub_type,
+                p2sh_type,
+            } => {
                 let private = Private {
                     prefix: wif_type,
                     secret: key_pair.private().secret.clone(),
@@ -240,32 +246,33 @@ async fn offline_keys_export_internal(
                     p2sh: AddressPrefix::from([p2sh_type]),
                 };
 
-                let address = AddressBuilder::new(
-                    AddressFormat::Standard,
-                    ChecksumType::DSHA256,
-                    address_prefixes,
-                    None,
-                )
-                .as_pkh_from_pk(*key_pair.public())
-                .build()
-                .map_err(|e| OfflineKeysError::Internal(e.to_string()))?;
+                let address =
+                    AddressBuilder::new(AddressFormat::Standard, ChecksumType::DSHA256, address_prefixes, None)
+                        .as_pkh_from_pk(*key_pair.public())
+                        .build()
+                        .map_err(|e| OfflineKeysError::Internal(e.to_string()))?;
 
                 (address.to_string(), private.to_string())
             },
             PrefixValues::NonUtxo => {
                 let protocol: CoinProtocol = serde_json::from_value(coin_conf["protocol"].clone())
                     .map_err(|_| OfflineKeysError::Internal(format!("Failed to parse protocol for {}", ticker)))?;
-                
+
                 let address = match protocol {
                     CoinProtocol::ETH { .. } | CoinProtocol::ERC20 { .. } | CoinProtocol::NFT { .. } => {
                         crate::eth::addr_from_pubkey_str(&pubkey)
                             .map_err(|e| OfflineKeysError::Internal(e.to_string()))?
                     },
-                    _ => return MmError::err(OfflineKeysError::Internal(format!("Unsupported non-UTXO protocol: {:?}", protocol))),
+                    _ => {
+                        return MmError::err(OfflineKeysError::Internal(format!(
+                            "Unsupported non-UTXO protocol: {:?}",
+                            protocol
+                        )))
+                    },
                 };
-                
+
                 let priv_key = format!("0x{}", key_pair.private().secret.to_hex());
-                
+
                 (address, priv_key)
             },
         };
@@ -288,10 +295,7 @@ async fn offline_hd_keys_export_internal(
     end_index: u32,
 ) -> Result<HdKeysResponse, MmError<OfflineKeysError>> {
     if start_index > end_index {
-        return MmError::err(OfflineKeysError::InvalidHdRange {
-            start_index,
-            end_index,
-        });
+        return MmError::err(OfflineKeysError::InvalidHdRange { start_index, end_index });
     }
 
     if end_index - start_index > 100 {
@@ -316,26 +320,32 @@ async fn offline_hd_keys_export_internal(
         let prefix_values = extract_prefix_values(ticker, &coin_conf)?;
 
         let mut addresses = Vec::with_capacity((end_index - start_index + 1) as usize);
-        
+
         let passphrase = ctx.conf["passphrase"].as_str().unwrap_or("");
 
         for index in start_index..=end_index {
             let seed = format!("{}{}/{}_{}_{}", passphrase, ticker, index, ticker, index);
-            
+
             let key_pair = {
                 match key_pair_from_seed(&seed) {
                     Ok(kp) => kp,
-                    Err(e) => return MmError::err(OfflineKeysError::KeyDerivationFailed {
-                        ticker: ticker.clone(),
-                        error: format!("Failed to derive HD key at index {}: {}", index, e),
-                    }),
+                    Err(e) => {
+                        return MmError::err(OfflineKeysError::KeyDerivationFailed {
+                            ticker: ticker.clone(),
+                            error: format!("Failed to derive HD key at index {}: {}", index, e),
+                        })
+                    },
                 }
             };
 
             let pubkey = key_pair.public().to_vec().to_hex().to_string();
-            
+
             let (address, priv_key) = match &prefix_values {
-                PrefixValues::Utxo { wif_type, pub_type, p2sh_type } => {
+                PrefixValues::Utxo {
+                    wif_type,
+                    pub_type,
+                    p2sh_type,
+                } => {
                     let private = Private {
                         prefix: *wif_type,
                         secret: key_pair.private().secret.clone(),
@@ -348,32 +358,33 @@ async fn offline_hd_keys_export_internal(
                         p2sh: AddressPrefix::from([*p2sh_type]),
                     };
 
-                    let address = AddressBuilder::new(
-                        AddressFormat::Standard,
-                        ChecksumType::DSHA256,
-                        address_prefixes,
-                        None,
-                    )
-                    .as_pkh_from_pk(*key_pair.public())
-                    .build()
-                    .map_err(|e| OfflineKeysError::Internal(e.to_string()))?;
+                    let address =
+                        AddressBuilder::new(AddressFormat::Standard, ChecksumType::DSHA256, address_prefixes, None)
+                            .as_pkh_from_pk(*key_pair.public())
+                            .build()
+                            .map_err(|e| OfflineKeysError::Internal(e.to_string()))?;
 
                     (address.to_string(), private.to_string())
                 },
                 PrefixValues::NonUtxo => {
                     let protocol: CoinProtocol = serde_json::from_value(coin_conf["protocol"].clone())
                         .map_err(|_| OfflineKeysError::Internal(format!("Failed to parse protocol for {}", ticker)))?;
-                    
+
                     let address = match protocol {
                         CoinProtocol::ETH { .. } | CoinProtocol::ERC20 { .. } | CoinProtocol::NFT { .. } => {
                             crate::eth::addr_from_pubkey_str(&pubkey)
                                 .map_err(|e| OfflineKeysError::Internal(e.to_string()))?
                         },
-                        _ => return MmError::err(OfflineKeysError::Internal(format!("Unsupported non-UTXO protocol: {:?}", protocol))),
+                        _ => {
+                            return MmError::err(OfflineKeysError::Internal(format!(
+                                "Unsupported non-UTXO protocol: {:?}",
+                                protocol
+                            )))
+                        },
                     };
-                    
+
                     let priv_key = format!("0x{}", key_pair.private().secret.to_hex());
-                    
+
                     (address, priv_key)
                 },
             };
@@ -417,21 +428,27 @@ async fn offline_iguana_keys_export_internal(
         let prefix_values = extract_prefix_values(ticker, &coin_conf)?;
 
         let passphrase = ctx.conf["passphrase"].as_str().unwrap_or("");
-        
+
         let key_pair = {
             match key_pair_from_seed(passphrase) {
                 Ok(kp) => kp,
-                Err(e) => return MmError::err(OfflineKeysError::KeyDerivationFailed {
-                    ticker: ticker.clone(),
-                    error: e.to_string(),
-                }),
+                Err(e) => {
+                    return MmError::err(OfflineKeysError::KeyDerivationFailed {
+                        ticker: ticker.clone(),
+                        error: e.to_string(),
+                    })
+                },
             }
         };
 
         let pubkey = key_pair.public().to_vec().to_hex().to_string();
-        
+
         let (address, priv_key) = match prefix_values {
-            PrefixValues::Utxo { wif_type, pub_type, p2sh_type } => {
+            PrefixValues::Utxo {
+                wif_type,
+                pub_type,
+                p2sh_type,
+            } => {
                 let private = Private {
                     prefix: wif_type,
                     secret: key_pair.private().secret.clone(),
@@ -444,32 +461,33 @@ async fn offline_iguana_keys_export_internal(
                     p2sh: AddressPrefix::from([p2sh_type]),
                 };
 
-                let address = AddressBuilder::new(
-                    AddressFormat::Standard,
-                    ChecksumType::DSHA256,
-                    address_prefixes,
-                    None,
-                )
-                .as_pkh_from_pk(*key_pair.public())
-                .build()
-                .map_err(|e| OfflineKeysError::Internal(e.to_string()))?;
+                let address =
+                    AddressBuilder::new(AddressFormat::Standard, ChecksumType::DSHA256, address_prefixes, None)
+                        .as_pkh_from_pk(*key_pair.public())
+                        .build()
+                        .map_err(|e| OfflineKeysError::Internal(e.to_string()))?;
 
                 (address.to_string(), private.to_string())
             },
             PrefixValues::NonUtxo => {
                 let protocol: CoinProtocol = serde_json::from_value(coin_conf["protocol"].clone())
                     .map_err(|_| OfflineKeysError::Internal(format!("Failed to parse protocol for {}", ticker)))?;
-                
+
                 let address = match protocol {
                     CoinProtocol::ETH { .. } | CoinProtocol::ERC20 { .. } | CoinProtocol::NFT { .. } => {
                         crate::eth::addr_from_pubkey_str(&pubkey)
                             .map_err(|e| OfflineKeysError::Internal(e.to_string()))?
                     },
-                    _ => return MmError::err(OfflineKeysError::Internal(format!("Unsupported non-UTXO protocol: {:?}", protocol))),
+                    _ => {
+                        return MmError::err(OfflineKeysError::Internal(format!(
+                            "Unsupported non-UTXO protocol: {:?}",
+                            protocol
+                        )))
+                    },
                 };
-                
+
                 let priv_key = format!("0x{}", key_pair.private().secret.to_hex());
-                
+
                 (address, priv_key)
             },
         };
@@ -497,18 +515,15 @@ pub async fn get_private_keys(
         KeyExportMode::Hd => {
             let start_index = req.start_index.unwrap_or(0);
             let end_index = req.end_index.unwrap_or(start_index + 10);
-            
+
             if start_index > end_index {
-                return MmError::err(OfflineKeysError::InvalidHdRange {
-                    start_index,
-                    end_index,
-                });
+                return MmError::err(OfflineKeysError::InvalidHdRange { start_index, end_index });
             }
-            
+
             if end_index - start_index > 100 {
                 return MmError::err(OfflineKeysError::HdRangeTooLarge);
             }
-            
+
             let response = offline_hd_keys_export_internal(ctx, req.coins, start_index, end_index).await?;
             Ok(GetPrivateKeysResponse::Hd(response))
         },
