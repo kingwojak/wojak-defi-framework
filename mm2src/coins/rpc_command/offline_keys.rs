@@ -35,6 +35,11 @@ pub struct GetPrivateKeysRequest {
 
 fn default_mode() -> KeyExportMode { KeyExportMode::Standard }
 
+#[derive(Debug, Deserialize)]
+pub struct OfflineKeysRequest {
+    pub coins: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct CoinKeyInfo {
     pub coin: String,
@@ -191,13 +196,13 @@ fn coin_conf_with_protocol(ctx: &MmArc, ticker: &str, conf_override: Option<Json
     Ok((conf, protocol))
 }
 
-async fn offline_keys_export_internal(
+pub async fn offline_keys_export_internal(
     ctx: MmArc,
-    coins: Vec<String>,
+    req: OfflineKeysRequest,
 ) -> Result<StandardKeysResponse, MmError<OfflineKeysError>> {
-    let mut result = Vec::with_capacity(coins.len());
+    let mut result = Vec::with_capacity(req.coins.len());
 
-    for ticker in &coins {
+    for ticker in &req.coins {
         let (coin_conf, _) = coin_conf_with_protocol(&ctx, ticker, None)
             .map_err(|_| OfflineKeysError::CoinConfigNotFound(ticker.clone()))?;
 
@@ -408,11 +413,11 @@ async fn offline_hd_keys_export_internal(
 
 async fn offline_iguana_keys_export_internal(
     ctx: MmArc,
-    coins: Vec<String>,
+    req: OfflineKeysRequest,
 ) -> Result<StandardKeysResponse, MmError<OfflineKeysError>> {
-    let mut result = Vec::with_capacity(coins.len());
+    let mut result = Vec::with_capacity(req.coins.len());
 
-    for ticker in &coins {
+    for ticker in &req.coins {
         let (coin_conf, _) = coin_conf_with_protocol(&ctx, ticker, None)
             .map_err(|_| OfflineKeysError::CoinConfigNotFound(ticker.clone()))?;
 
@@ -509,7 +514,10 @@ pub async fn get_private_keys(
 ) -> Result<GetPrivateKeysResponse, MmError<OfflineKeysError>> {
     match req.mode {
         KeyExportMode::Standard => {
-            let response = offline_keys_export_internal(ctx, req.coins).await?;
+            let offline_req = OfflineKeysRequest {
+                coins: req.coins,
+            };
+            let response = offline_keys_export_internal(ctx, offline_req).await?;
             Ok(GetPrivateKeysResponse::Standard(response))
         },
         KeyExportMode::Hd => {
@@ -528,7 +536,10 @@ pub async fn get_private_keys(
             Ok(GetPrivateKeysResponse::Hd(response))
         },
         KeyExportMode::Iguana => {
-            let response = offline_iguana_keys_export_internal(ctx, req.coins).await?;
+            let offline_req = OfflineKeysRequest {
+                coins: req.coins,
+            };
+            let response = offline_iguana_keys_export_internal(ctx, offline_req).await?;
             Ok(GetPrivateKeysResponse::Standard(response))
         },
     }
